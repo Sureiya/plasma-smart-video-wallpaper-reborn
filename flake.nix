@@ -2,7 +2,10 @@
   description = "plasma-smart-video-wallpaper-reborn: dev shell + package + NixOS module";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    # Pin to the SAME nixpkgs rev as the system's /etc/nixos/flake.lock so the
+    # native .so links against the exact Qt/KF6 the running plasmashell uses
+    # (otherwise Qt private-API symbols mismatch and the module fails to load).
+    nixpkgs.url = "github:NixOS/nixpkgs/8f0500b9660505dc3cb647775fe9a978a74b5283";
   };
 
   outputs = { self, nixpkgs }:

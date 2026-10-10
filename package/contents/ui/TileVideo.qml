@@ -47,19 +47,22 @@ Item {
 
     // Native capped decoder (GStreamer playbin -> videoconvert -> videoscale ->
     // capsfilter -> appsink), feeding frames to QVideoSink at <= the cap.
+    // VideoOutput's `videoSink` is read-only (it owns the sink); we assign that
+    // sink to the player (whose `videoSink` is writable), so the player renders
+    // into the VideoOutput.
     CappedVideoPlayer {
         id: player
         source: root.videoSource ? root.videoSource.filename : ""
         maxWidth: root.maxDecodeWidth
         maxHeight: root.maxDecodeHeight
         loops: true
+        videoSink: videoOutput.videoSink
     }
 
     VideoOutput {
         id: videoOutput
         anchors.fill: parent
         fillMode: root.fillMode
-        videoSink: player.videoSink
     }
 
     onShouldPlayChanged: {
