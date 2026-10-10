@@ -219,7 +219,7 @@ WallpaperItem {
     // the file) when actually called, avoiding a "cacheDir of undefined" at
     // property-binding time.
     function monitorRegistryDir() {
-        return main.folderCacheStore.cacheDir + "/monitors";
+        return folderCacheStore.cacheDir + "/monitors";
     }
     readonly property int _monitorRankX: {
         const g = (Plasmoid && Plasmoid.screenGeometry) ? Plasmoid.screenGeometry : null;
@@ -480,7 +480,7 @@ WallpaperItem {
             const folder = main._pendingFolders.shift();
             if (!folder) continue;
             // Skip folders already indexed in the current in-memory cache.
-            const cur = main.folderCacheStore.cache || {};
+            const cur = folderCacheStore.cache || {};
             if (Array.isArray(cur[folder]) && cur[folder].length > 0) continue;
             main._enumeratingFolder = true;
             const conds = Utils.VIDEO_EXTENSIONS.map(e => `-iname "*${e}"`).join(" -o ");
@@ -491,12 +491,12 @@ WallpaperItem {
                 const files = out.split("\n").map(f => f.trim())
                     .filter(f => f.length > 0).map(f => "file://" + f);
                 if (files.length > 0) {
-                    const c = main.folderCacheStore.cache || {};
+                    const c = folderCacheStore.cache || {};
                     c[folder] = files;
-                    main.folderCacheStore.cache = c;
-                    main.folderCacheStore.save();
+                    folderCacheStore.cache = c;
+                    folderCacheStore.save();
                 }
-                main.folderCache = JSON.stringify(main.folderCacheStore.cache || {});
+                main.folderCache = JSON.stringify(folderCacheStore.cache || {});
                 main.requestVideosConfigRebuild();
                 main.enumerateNextFolder();
             }, undefined);
