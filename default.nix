@@ -63,6 +63,13 @@ stdenv.mkDerivation (finalAttrs: {
     "-DGST_PLUGIN_PATH_1_0=${lib.makeSearchPath "lib/gstreamer-1.0" [ (lib.getLib gst_all_1.gstreamer) gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good gst_all_1.gst-plugins-bad gst_all_1.gst-plugins-ugly gst_all_1.gst-libav ]}"
   ];
 
+  # plasma_install_package does not preserve the executable bit on tools/*.sh
+  # (upstream's install.sh does `chmod 755` after install). Restore it so the
+  # DBus screen-state monitor script is runnable from the read-only store.
+  postInstall = ''
+    chmod +x "$out/share/plasma/wallpapers/luisbocanegra.smart.video.wallpaper.reborn/contents/ui/tools/"*.sh 2>/dev/null || true
+  '';
+
   meta = with lib; {
     description = "Plasma 6 wallpaper plugin to play videos on your Desktop/Lock Screen";
     license = licenses.gpl2Plus;
