@@ -45,6 +45,18 @@ QVideoFrameFormat::PixelFormat toQtPixelFormat(GstVideoFormat fmt)
 CappedVideoPlayer::CappedVideoPlayer(QObject *parent)
     : QObject(parent)
 {
+    // GStreamer must be initialized before any element is created; QtMultimedia
+    // initializes it lazily, but our own pipeline creation needs it up front.
+    static bool gstReady = false;
+    if (!gstReady) {
+        GError *err = nullptr;
+        gstReady = gst_init_check(nullptr, nullptr, &err);
+        if (!gstReady) {
+            qWarning() << "CappedVideoPlayer: gst_init failed:"
+                       << (err ? err->message : "unknown");
+            g_clear_error(&err);
+        }
+    }
 }
 
 CappedVideoPlayer::~CappedVideoPlayer()
