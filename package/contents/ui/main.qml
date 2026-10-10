@@ -795,6 +795,16 @@ WallpaperItem {
             visible: main.tilesMode || player.multipleVideos
         },
         PlasmaCore.Action {
+            text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Reset Choreography")
+            icon.name: "view-refresh"
+            onTriggered: {
+                if (main.tilesMode && tilesPlayerLoader.item) {
+                    tilesPlayerLoader.item.resetChoreography();
+                }
+            }
+            visible: main.tilesMode
+        },
+        PlasmaCore.Action {
             text: {
                 if (main.playbackOverride === Enum.PlaybackOverride.Default) {
                     return main.playing ? i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Pause") : i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Play");

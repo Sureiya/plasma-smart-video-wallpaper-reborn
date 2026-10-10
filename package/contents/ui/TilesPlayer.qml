@@ -412,6 +412,12 @@ Item {
         root.applySegments();
     }
 
+    // Reset the choreography: rebuild with a fresh seed, re-expanding to the
+    // maximum tile count (used by the right-click context menu).
+    function resetChoreography() {
+        root.rebuildGraph();
+    }
+
     // Rebuild when config changes materially.
     onVideosConfigChanged: root.rebuildGraph()
     onMaxTilesChanged: root.rebuildGraph()
