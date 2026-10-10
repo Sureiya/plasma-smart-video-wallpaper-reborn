@@ -144,6 +144,41 @@ void CappedVideoPlayer::setLoops(bool loops)
     emit loopsChanged();
 }
 
+void CappedVideoPlayer::setStabilize(bool s)
+{
+    if (m_stabilize == s) {
+        return;
+    }
+    m_stabilize = s;
+    emit stabilizeChanged();
+    if (!s) {
+        m_hasPrev = false;
+        m_prevGrid.clear();
+        m_offsetX = m_offsetY = 0;
+        m_smoothX = m_smoothY = 0;
+    }
+}
+
+void CappedVideoPlayer::setStabilizeMargin(qreal m)
+{
+    m = qBound(0.0, m, 0.25);
+    if (qFuzzyCompare(m_stabilizeMargin, m)) {
+        return;
+    }
+    m_stabilizeMargin = m;
+    emit stabilizeMarginChanged();
+}
+
+void CappedVideoPlayer::setStabilizeDamping(qreal d)
+{
+    d = qBound(0.02, d, 1.0);
+    if (qFuzzyCompare(m_stabilizeDamping, d)) {
+        return;
+    }
+    m_stabilizeDamping = d;
+    emit stabilizeDampingChanged();
+}
+
 void CappedVideoPlayer::play()
 {
     if (m_pipeline) {
@@ -235,17 +270,80 @@ static GstFlowReturn newSampleHandler(GstAppSink *appsink, gpointer data)
             return;
         }
 
-        QVideoFrameFormat format(QSize(info.width, info.height), pf);
+        // -- Translation-only stabilization: estimate global camera shift on a
+        // downsampled luminance grid, low-pass it, and accumulate a bounded
+        // residual offset so small stutter is cancelled while slow pans stay.
+        int marginX = 0, marginY = 0;
+        int offX = 0, offY = 0;
+        if (self->stabilize() && info.width >= 64 && info.height >= 36) {
+            const int GW = 64, GH = 36;
+            QVector<quint8> grid(GW * GH);
+            for (int gy = 0; gy < GH; ++gy) {
+                const int sy = gy * info.height / GH;
+                const uchar *row = map.data + sy * info.stride[0];
+                for (int gx = 0; gx < GW; ++gx) {
+                    const int sx = gx * info.width / GW;
+                    const uchar *px = row + sx * 4; // RGBA
+                    grid[gy * GW + gx] = quint8((int(px[0]) + int(px[1]) + int(px[2])) / 3);
+                }
+            }
+            if (self->m_hasPrev && self->m_prevGrid.size() == grid.size()) {
+                const int R = 4;
+                int bdx = 0, bdy = 0;
+                long best = 1L << 60;
+                for (int ty = -R; ty <= R; ++ty) {
+                    for (int tx = -R; tx <= R; ++tx) {
+                        long sad = 0;
+                        for (int gy = 0; gy < GH; ++gy) {
+                            const int py = gy + ty;
+                            if (py < 0 || py >= GH) continue;
+                            const quint8 *pr = self->m_prevGrid.constData() + py * GW;
+                            const quint8 *cr = grid.constData() + gy * GW;
+                            for (int gx = 0; gx < GW; ++gx) {
+                                const int px = gx + tx;
+                                if (px < 0 || px >= GW) continue;
+                                sad += qAbs(int(pr[px]) - int(cr[gx]));
+                            }
+                        }
+                        // Slight zero-bias so static shots don't drift.
+                        sad += (qAbs(tx) + qAbs(ty)) * 2;
+                        if (sad < best) { best = sad; bdx = tx; bdy = ty; }
+                    }
+                }
+                const float dx = float(bdx) * float(info.width) / float(GW);
+                const float dy = float(bdy) * float(info.height) / float(GH);
+                const float a = float(self->stabilizeDamping());
+                self->m_smoothX += a * (dx - self->m_smoothX);
+                self->m_smoothY += a * (dy - self->m_smoothY);
+                self->m_offsetX += (dx - self->m_smoothX);
+                self->m_offsetY += (dy - self->m_smoothY);
+            }
+            self->m_prevGrid = grid;
+            self->m_hasPrev = true;
+
+            marginX = int(info.width * self->stabilizeMargin());
+            marginY = int(info.height * self->stabilizeMargin());
+            self->m_offsetX = qBound(-float(marginX), self->m_offsetX, float(marginX));
+            self->m_offsetY = qBound(-float(marginY), self->m_offsetY, float(marginY));
+            offX = int(self->m_offsetX);
+            offY = int(self->m_offsetY);
+        }
+
+        const int outW = info.width - 2 * marginX;
+        const int outH = info.height - 2 * marginY;
+        const int srcStartX = marginX + offX;
+        const int srcStartY = marginY + offY;
+
+        QVideoFrameFormat format(QSize(outW, outH), pf);
         QVideoFrame frame(format);
 
         if (frame.map(QVideoFrame::WriteOnly)) {
             const int srcStride = info.stride[0];
             const int dstStride = frame.bytesPerLine(0);
-            const int copyBytes = qMin(srcStride, dstStride);
-            const int rows = info.height;
+            const int copyBytes = qMin(outW * 4, dstStride);
             uchar *dst = frame.bits(0);
-            const uchar *src = map.data;
-            for (int y = 0; y < rows; ++y) {
+            const uchar *src = map.data + srcStartY * srcStride + srcStartX * 4;
+            for (int y = 0; y < outH; ++y) {
                 memcpy(dst, src, copyBytes);
                 dst += dstStride;
                 src += srcStride;

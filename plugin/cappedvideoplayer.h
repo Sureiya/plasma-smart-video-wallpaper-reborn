@@ -14,6 +14,7 @@
 #include <QQmlEngine>
 #include <QUrl>
 #include <QVariant>
+#include <QVector>
 
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
@@ -53,6 +54,9 @@ class CappedVideoPlayer : public QObject
     Q_PROPERTY(bool seekable READ seekable NOTIFY seekableChanged)
     Q_PROPERTY(int mediaStatus READ mediaStatus NOTIFY mediaStatusChanged)
     Q_PROPERTY(bool playing READ playing NOTIFY playingChanged)
+    Q_PROPERTY(bool stabilize READ stabilize WRITE setStabilize NOTIFY stabilizeChanged)
+    Q_PROPERTY(qreal stabilizeMargin READ stabilizeMargin WRITE setStabilizeMargin NOTIFY stabilizeMarginChanged)
+    Q_PROPERTY(qreal stabilizeDamping READ stabilizeDamping WRITE setStabilizeDamping NOTIFY stabilizeDampingChanged)
 
 public:
     explicit CappedVideoPlayer(QObject *parent = nullptr);
@@ -79,12 +83,29 @@ public:
     int mediaStatus() const { return m_mediaStatus; }
     bool playing() const { return m_playing; }
 
+    bool stabilize() const { return m_stabilize; }
+    void setStabilize(bool s);
+    qreal stabilizeMargin() const { return m_stabilizeMargin; }
+    void setStabilizeMargin(qreal m);
+    qreal stabilizeDamping() const { return m_stabilizeDamping; }
+    void setStabilizeDamping(qreal d);
+
     // Used internally (and by the appsink callback) to advance the position.
     void updatePosition(qint64 pos);
 
     // Called from the caps probe once the source dimensions are known; computes
     // an aspect-preserving target <= (maxWidth,maxHeight) and sets the capsfilter.
     void applyAspectCap(int srcW, int srcH);
+
+    // -- Stabilization state (translation-only digital stabilization). Public so
+    // the static appsink callback (newSampleHandler) can update it directly.
+    bool m_stabilize = true;          // default ON
+    qreal m_stabilizeMargin = 0.06;   // fraction of frame cropped per edge
+    qreal m_stabilizeDamping = 0.2;   // low-pass strength (0..1)
+    QVector<quint8> m_prevGrid;       // previous downsampled luminance grid
+    bool m_hasPrev = false;
+    float m_offsetX = 0, m_offsetY = 0; // accumulated residual (pixels)
+    float m_smoothX = 0, m_smoothY = 0; // smoothed inter-frame shift
 
 public slots:
     void play();
@@ -103,6 +124,9 @@ signals:
     void seekableChanged();
     void mediaStatusChanged();
     void playingChanged();
+    void stabilizeChanged();
+    void stabilizeMarginChanged();
+    void stabilizeDampingChanged();
 
 private:
     void buildPipeline();
