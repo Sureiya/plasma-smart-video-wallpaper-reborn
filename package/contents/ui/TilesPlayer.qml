@@ -94,47 +94,48 @@ Item {
         onMessage: (msg) => root.onWorkerMessage(msg)
     }
 
-    // Best-effort detection of black bars using ffprobe's cropdetect on the
-    // first few seconds. Results are cached so each video is only probed once.
+    // Best-effort detection of black bars using ffprobe (dims) + ffmpeg
+    // cropdetect (black-bar-free crop rect). Results are cached per video.
     function detectBorders(filename) {
         if (!filename || filename in root.cropCache) {
             return;
         }
         root.cropCache[filename] = null; // mark in-flight to avoid re-probing
-        // Query stream dims and container duration with clear delimiters so the
-        // parse is robust (stream entries then a DURATION= line).
+        // Pass 1: native stream dimensions. Pass 2: cropdetect on a few early
+        // frames to find the black-bar-free rect. The crop=W:H:X:Y line is
+        // emitted on stderr by ffmpeg, merged via 2>&1 and filtered with grep.
         const cmd = `ffprobe -v error -select_streams v:0 ` +
-            `-show_entries stream=width,height -show_entries format=duration ` +
-            `-of csv=p=0 -of default=noprint_wrappers=0 "${filename}" ` +
-            `&& echo DURATION= && ffprobe -v error -show_entries format=duration ` +
-            `-of csv=p=0 "${filename}"`;
+            `-show_entries stream=width,height -of csv=p=0 "${filename}" ` +
+            `&& echo CROP= && ffmpeg -hide_banner -ss 2 -i "${filename}" ` +
+            `-frames:v 40 -vf cropdetect=24:16:0 -f null - 2>&1 ` +
+            `| grep -oE 'crop=[0-9]+:[0-9]+:[0-9]+:[0-9]+' | tail -1`;
         borderCommand.exec(cmd, res => {
             const out = (res.stdout || "");
-            // width,height are the first csv line; duration is after DURATION=.
             const lines = out.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-            let w = 0, h = 0, durMs = 0;
-            // width,height from the first numeric csv line
+            // Native width/height from the first csv line.
+            let w = 0, h = 0;
             for (const l of lines) {
-                if (l === "DURATION=" || l.includes("DURATION")) continue;
+                if (l === "CROP=" || l.startsWith("crop=")) continue;
                 const parts = l.split(",");
                 if (parts.length >= 2) {
                     const pw = parseInt(parts[0], 10);
                     const ph = parseInt(parts[1], 10);
-                    if (pw > 0 && ph > 0 && w === 0) {
-                        w = pw;
-                        h = ph;
-                        break;
-                    }
+                    if (pw > 0 && ph > 0) { w = pw; h = ph; break; }
                 }
             }
-            // duration from the segment after DURATION=
-            const dIdx = lines.indexOf("DURATION=");
-            if (dIdx >= 0 && lines[dIdx + 1] !== undefined) {
-                const dv = parseFloat(lines[dIdx + 1]);
-                if (!isNaN(dv)) durMs = Math.round(dv * 1000);
+            // Crop rect from the crop=W:H:X:Y line (if cropdetect found bars).
+            let cw = 0, ch = 0, cx = 0, cy = 0;
+            const cropLine = lines.find(l => l.startsWith("crop="));
+            if (cropLine) {
+                const m = cropLine.match(/crop=(\d+):(\d+):(\d+):(\d+)/);
+                if (m) { cw = +m[1]; ch = +m[2]; cx = +m[3]; cy = +m[4]; }
             }
             if (w > 0 && h > 0) {
-                root.cropCache[filename] = { x: 0, y: 0, w, h, duration: durMs };
+                const finalW = (cw > 0 && cw < w) ? cw : w;
+                const finalH = (ch > 0 && ch < h) ? ch : h;
+                const finalX = (cw > 0 && cw < w) ? cx : 0;
+                const finalY = (ch > 0 && ch < h) ? cy : 0;
+                root.cropCache[filename] = { x: finalX, y: finalY, w: finalW, h: finalH, duration: 0 };
             }
         });
     }
