@@ -52,6 +52,28 @@ Item {
     property bool shouldPlay: true
     property bool debugEnabled: false
 
+    // -- Decode-resolution cap (used by the native CappedVideoPlayer per tile).
+    // The cap is chosen from the MONITOR resolution, not a hardcoded value:
+    //   4K+    (>= 3840 wide or 2160 tall)  -> 1920x1080  (1080p)
+    //   1080p+ (>= 1920 wide or 1080 tall)  -> 1280x720   (720p)
+    //   smaller                              -> half the monitor resolution
+    // Tiles are small and PreserveAspectCrop-cropped, so decoding above this is
+    // wasted VRAM. This mirrors the "1080 on 4K / 720 on 1080p" rule.
+    readonly property int maxDecodeWidth: {
+        const w = root.width, h = root.height;
+        const m = Math.max(w, h);
+        if (m >= 3840) return 1920;
+        if (m >= 1920) return 1280;
+        return Math.max(640, Math.round(w / 2));
+    }
+    readonly property int maxDecodeHeight: {
+        const w = root.width, h = root.height;
+        const m = Math.max(w, h);
+        if (m >= 3840) return 1080;
+        if (m >= 1920) return 720;
+        return Math.max(360, Math.round(h / 2));
+    }
+
     // -- Border (letterbox/pillarbox) detection cache --
     // Maps filename -> { x, y, w, h } crop rect (in source pixels) or null if
     // no significant bars were found. Filled asynchronously via ffprobe.
@@ -124,6 +146,13 @@ Item {
     // -- Internal state --
     property int cycleSeed: 0
     property var activeVideos: []
+    // Per-tile-pool-slot tracking of the srcVideo index each slot is currently
+    // showing. This is what keeps a tile "following" its video across transform
+    // phases: a slot keeps its video (and thus only repositions when that video's
+    // cell genuinely changes during a merge/diverge) instead of being reassigned
+    // positionally every step (which made tiles jump/teleport randomly because
+    // packLayout reorders the tile list between steps).
+    property var _slotVideos: []
 
     // Full-screen background so layout gaps read as intentional negative space
     // rather than rendering errors.
@@ -364,7 +393,7 @@ Item {
         if (effectiveStyle === Enum.TilesLayoutStyle.Random) {
             effectiveStyle = Math.floor(Math.random() * 7); // 0..6 (concrete styles)
         }
-        return { aspects: aspects, seed: seed, style: effectiveStyle };
+        return { aspects: aspects, seed: seed, style: effectiveStyle, videos: chosen };
     }
 
     // Send a "build" request to the worker for the given packet.
@@ -404,6 +433,12 @@ Item {
             ensurePhases: null,
             _chunkDone: false,
             _chunkRequested: false,
+            // Snapshot the videos this graph was built against so applyPhase
+            // never reads a different cycle's list (root.activeVideos is
+            // overwritten by look-ahead preloads; that aliasing made `srcIdx`
+            // resolve to the wrong video and, via the `|| [0]` fallback, put the
+            // SAME video on multiple tiles).
+            videos: root.buildingGraph ? root.buildingGraph.videos : root.activeVideos,
         };
         g.ensurePhases = function (phaseIndex) {
             if (phaseIndex < g.phases.length) return;   // already materialized
@@ -526,6 +561,7 @@ Item {
                 phases: phases,
                 ensurePhases: null,
                 _chunkDone: true,
+                videos: packet.videos,
             });
         }
     }
@@ -551,36 +587,69 @@ Item {
         const tiles = tileHost.tiles;
         const p = progress === undefined ? 1.0 : progress;
 
-        // Map srcVideo -> previous rect for stable interpolation across the
-        // tile-count reduction (tiles that "merge into" another use the target's
-        // geometry).
-        const prevByVideo = {};
+        // Identity-based matching: build maps keyed by srcVideo so a tile SLOT
+        // keeps following ITS video across phases, rather than being assigned the
+        // i-th element of a freshly-reordered `phase.tiles` array (packLayout
+        // reshuffles the order every step because it is seeded with `seed ^ si`,
+        // so positional assignment made tiles teleport to unrelated videos'
+        // cells).
+        const curByVideo = {};   // srcVideo -> { from, to }
+        for (const rt of phase.tiles) {
+            curByVideo[rt.srcVideo] = { from: rt.from, to: rt.to };
+        }
+        const prevByVideo = {};  // srcVideo -> previous { x,y,w,h } (its "to")
         const prevTiles = phase.prevTiles || phase.tiles;
         for (const pt of prevTiles) {
-            prevByVideo[pt.srcVideo] = pt;
+            prevByVideo[pt.srcVideo] = pt.to;
         }
 
-        const phaseCount = phase.tiles.length;
+        // Videos present in THIS phase, in palette order (stable-ish).
+        const curVideos = Object.keys(curByVideo).map(Number);
+
+        // 1) Release slots whose video is no longer present (merged away).
+        for (let i = 0; i < tiles.length; i++) {
+            const vid = root._slotVideos[i];
+            if (vid !== undefined && !(vid in curByVideo)) {
+                root._slotVideos[i] = undefined;
+            }
+        }
+
+        // 2) Assign any not-yet-shown video to a free slot (divergence).
+        const freeSlots = [];
+        for (let i = 0; i < tiles.length; i++) {
+            if (root._slotVideos[i] === undefined) freeSlots.push(i);
+        }
+        for (const vid of curVideos) {
+            const already = root._slotVideos.indexOf(vid);
+            if (already !== -1) continue;       // already has a slot
+            const s = freeSlots.shift();
+            if (s === undefined) break;          // out of slots (shouldn't happen)
+            root._slotVideos[s] = vid;
+        }
+
+        // 3) Draw each slot: video follows its own {from,to} pair.
+        const videosForGraph = root.graph.videos || root.activeVideos;
         for (let i = 0; i < tiles.length; i++) {
             const t = tiles[i];
-            if (i >= phaseCount) {
+            const vid = root._slotVideos[i];
+            if (vid === undefined || !(vid in curByVideo)) {
                 t.visible = false;
                 continue;
             }
-            const rect = phase.tiles[i];
             t.visible = true;
-            const srcIdx = rect.srcVideo !== undefined ? rect.srcVideo : i;
-            t.videoSource = root.activeVideos[srcIdx] || root.activeVideos[0];
+            t.videoSource = videosForGraph[vid] || null;
 
-            const prev = prevByVideo[srcIdx] || rect;
-            const from = phase.prevTiles && prev ? prev.to : rect.from;
-            const r = TilesLayout.interpolateRect(from, rect.to, p);
+            const cur = curByVideo[vid];
+            // `from` for interpolation: this video's previous cell (prevByVideo)
+            // if it existed in the prior phase, otherwise its own start position.
+            const from = prevByVideo[vid] !== undefined ? prevByVideo[vid] : cur.from;
+            const r = TilesLayout.interpolateRect(from, cur.to, p);
 
             t.tileX = r.x;
             t.tileY = r.y;
             t.tileW = r.w;
             t.tileH = r.h;
-            t.muted = root.muted || i !== root.graph.winnerIndex;
+            t.muted = root.muted || vid !== root.graph.winnerIndex;
         }
     }
 
