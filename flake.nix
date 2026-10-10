@@ -1,5 +1,5 @@
 {
-  description = "Dev shell for plasma-smart-video-wallpaper-reborn native plugin (Qt6 + GStreamer + KF6)";
+  description = "plasma-smart-video-wallpaper-reborn: dev shell + package + NixOS module";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -9,11 +9,22 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-      # Match the Plasma 6.6.6 / KF6 6.26 / Qt6 6.11 runtime found on this box.
       qt6 = pkgs.qt6;
       gst = pkgs.gst_all_1;
       kde = pkgs.kdePackages;
+
+      # The wallpaper + native plugin, built from THIS checkout.
+      wallpaper = pkgs.callPackage ./default.nix {
+        src = pkgs.lib.cleanSource ./.;
+        wrapQtAppsHook = qt6.wrapQtAppsHook;
+      };
+
     in {
+      packages.${system} = {
+        default = wallpaper;
+        wallpaper = wallpaper;
+      };
+
       devShells.${system}.default = pkgs.mkShell {
         nativeBuildInputs = [
           pkgs.cmake
@@ -24,21 +35,16 @@
         ];
 
         buildInputs = [
-          # Qt6 (QML module authoring + Multimedia for the custom sink)
           qt6.qtbase
           qt6.qtdeclarative
           qt6.qtmultimedia
-          qt6.qttools          # moc, etc. (qmake-adjacent tooling)
+          qt6.qttools
           qt6.wrapQtAppsHook
-
-          # GStreamer (decode → videoscale → capsfilter pipeline)
           gst.gstreamer
           gst.gst-plugins-base
           gst.gst-plugins-good
           gst.gst-plugins-bad
           gst.gst-libav
-
-          # KDE Frameworks / Plasma (matches KNightTime + KCMUtils deps)
           kde.extra-cmake-modules
           kde.kcoreaddons
           kde.knighttime
@@ -48,7 +54,6 @@
           kde.kconfigwidgets
         ];
 
-        # Let pkg-config (via nix's pkg-config wrapper) find all the dev packages.
         shellHook = ''
           echo "plasma-smart-video-wallpaper-reborn dev shell"
           echo "  Qt6: $(pkg-config --modversion Qt6Core 2>/dev/null || echo n/a)"
@@ -56,5 +61,26 @@
           echo "  build: cmake -B build -G Ninja && cmake --build build"
         '';
       };
+
+      # NixOS module: adds the wallpaper package to the system so both the
+      # wallpaper (share/plasma/wallpapers) and its QML plugin are on the
+      # import paths, then lets the user install it via KPackage.
+      nixosModules.default = { config, lib, ... }:
+        let cfg = config.plasma-smart-video-wallpaper-reborn;
+        in {
+          options.plasma-smart-video-wallpaper-reborn.enable = lib.mkEnableOption "Smart Video Wallpaper Reborn";
+
+          config = lib.mkIf cfg.enable {
+            environment.systemPackages = [ wallpaper ];
+
+            # Ensure the QML module is in the session's import path. The native
+            # plugin installs to ${wallpaper}/lib/qt-6/qml/..., which matches Qt6's
+            # module prefix and lands on NIXPKGS_QT6_QML_IMPORT_PATH when the
+            # package is in systemPackages.
+            environment.sessionVariables.QML_IMPORT_PATH = [
+              "${wallpaper}/lib/qt-6/qml"
+            ];
+          };
+        };
     };
 }
