@@ -275,8 +275,13 @@ static GstFlowReturn newSampleHandler(GstAppSink *appsink, gpointer data)
         // residual offset so small stutter is cancelled while slow pans stay.
         int marginX = 0, marginY = 0;
         int offX = 0, offY = 0;
-        if (self->stabilize() && info.width >= 64 && info.height >= 36) {
-            const int GW = 64, GH = 36;
+        if (self->stabilize()) {
+            // ~8px per grid cell + parabolic sub-pixel fit => ~1-2px accuracy,
+            // fine enough to see the few-pixel camera stutter that a 64x36 grid
+            // (20px/cell) completely missed.
+            const int cell = 8;
+            const int GW = qMax(32, info.width / cell);
+            const int GH = qMax(18, info.height / cell);
             QVector<quint8> grid(GW * GH);
             for (int gy = 0; gy < GH; ++gy) {
                 const int sy = gy * info.height / GH;
@@ -287,31 +292,53 @@ static GstFlowReturn newSampleHandler(GstAppSink *appsink, gpointer data)
                     grid[gy * GW + gx] = quint8((int(px[0]) + int(px[1]) + int(px[2])) / 3);
                 }
             }
+            float dx = 0, dy = 0;
             if (self->m_hasPrev && self->m_prevGrid.size() == grid.size()) {
+                const long INVALID = 1L << 60;
+                auto sadAt = [&](int tx, int ty) -> long {
+                    long sad = 0;
+                    for (int gy = 0; gy < GH; ++gy) {
+                        const int py = gy + ty;
+                        if (py < 0 || py >= GH) return INVALID;
+                        const quint8 *pr = self->m_prevGrid.constData() + py * GW;
+                        const quint8 *cr = grid.constData() + gy * GW;
+                        for (int gx = 0; gx < GW; ++gx) {
+                            const int px = gx + tx;
+                            if (px < 0 || px >= GW) return INVALID;
+                            sad += qAbs(int(pr[px]) - int(cr[gx]));
+                        }
+                    }
+                    return sad;
+                };
                 const int R = 4;
                 int bdx = 0, bdy = 0;
-                long best = 1L << 60;
+                long best = INVALID, bestRaw = 0;
                 for (int ty = -R; ty <= R; ++ty) {
                     for (int tx = -R; tx <= R; ++tx) {
-                        long sad = 0;
-                        for (int gy = 0; gy < GH; ++gy) {
-                            const int py = gy + ty;
-                            if (py < 0 || py >= GH) continue;
-                            const quint8 *pr = self->m_prevGrid.constData() + py * GW;
-                            const quint8 *cr = grid.constData() + gy * GW;
-                            for (int gx = 0; gx < GW; ++gx) {
-                                const int px = gx + tx;
-                                if (px < 0 || px >= GW) continue;
-                                sad += qAbs(int(pr[px]) - int(cr[gx]));
-                            }
-                        }
+                        const long raw = sadAt(tx, ty);
+                        if (raw >= INVALID) continue;
                         // Slight zero-bias so static shots don't drift.
-                        sad += (qAbs(tx) + qAbs(ty)) * 2;
-                        if (sad < best) { best = sad; bdx = tx; bdy = ty; }
+                        const long cost = raw + (qAbs(tx) + qAbs(ty)) * 4;
+                        if (cost < best) { best = cost; bestRaw = raw; bdx = tx; bdy = ty; }
                     }
                 }
-                const float dx = float(bdx) * float(info.width) / float(GW);
-                const float dy = float(bdy) * float(info.height) / float(GH);
+                // Sub-pixel parabolic refinement (x and y independently).
+                float fx = float(bdx), fy = float(bdy);
+                {
+                    const long sL = sadAt(bdx - 1, bdy);
+                    const long sR = sadAt(bdx + 1, bdy);
+                    const long dn = (sL < INVALID && sR < INVALID) ? (sL - 2 * bestRaw + sR) : 0;
+                    if (dn != 0) fx += 0.5f * float(sL - sR) / float(dn);
+                }
+                {
+                    const long sT = sadAt(bdx, bdy - 1);
+                    const long sB = sadAt(bdx, bdy + 1);
+                    const long dn = (sT < INVALID && sB < INVALID) ? (sT - 2 * bestRaw + sB) : 0;
+                    if (dn != 0) fy += 0.5f * float(sT - sB) / float(dn);
+                }
+                dx = fx * float(info.width) / float(GW);
+                dy = fy * float(info.height) / float(GH);
+
                 const float a = float(self->stabilizeDamping());
                 self->m_smoothX += a * (dx - self->m_smoothX);
                 self->m_smoothY += a * (dy - self->m_smoothY);
