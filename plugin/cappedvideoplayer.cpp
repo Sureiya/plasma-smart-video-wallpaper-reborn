@@ -173,6 +173,12 @@ void CappedVideoPlayer::stop()
         m_playing = false;
         emit playingChanged();
     }
+    // Release the last rendered frame/texture from the sink so VRAM actually
+    // drops when paused (the pipeline NULL state stops decoding, but the last
+    // QVideoFrame texture stays resident until cleared).
+    if (m_videoSink) {
+        m_videoSink->setVideoFrame(QVideoFrame());
+    }
 }
 
 void CappedVideoPlayer::seek(qint64 pos)

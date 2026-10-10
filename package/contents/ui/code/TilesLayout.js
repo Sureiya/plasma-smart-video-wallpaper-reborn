@@ -1099,7 +1099,7 @@ function buildGraph(seed, screenW, screenH, videos, mergeDurationMs, style, tran
           const towardCenter = c < midpoint ? 1 : -1;
           const wanderChance = 0.45;
           const direction = rng() < wanderChance ? -towardCenter : towardCenter;
-          const stride = 1 + Math.floor(rng() * maze);
+          const stride = 1; // merge/diverge one tile at a time
           delta = direction * stride;
         }
         const next = Math.max(1, Math.min(maxCount, c + delta));
@@ -1377,6 +1377,15 @@ function buildGraphPlanUncached(seed, screenW, screenH, videos, mergeDurationMs,
 
   const rng = mulberry32(seed ^ 0x9E3779B9);
 
+  // Stable full layout, packed ONCE with a single seed. Tiles keep these cells
+  // for the entire choreography; merge/diverge is derived from it (the rightmost
+  // tile absorbs/sheds its neighbour) instead of re-packing a fresh random layout
+  // every step, which made tiles teleport instead of merging.
+  const stableOrder = videos.map((_, i) => i);
+  const fullAspect = videos.map(v => ({ filename: v.filename, aspect: v.aspect > 0 ? v.aspect : 16 / 9 }));
+  const fullRects = packLayout(st, screenW, screenH, fullAspect, mulberry32(seed), 0.1, heroSec);
+
+
   function region(x, y, w, h) { return { x, y, w, h }; }
   function unionRegion(regions) {
     const x = Math.min(...regions.map(r => r.x));
@@ -1405,7 +1414,7 @@ function buildGraphPlanUncached(seed, screenW, screenH, videos, mergeDurationMs,
           const towardCenter = c < midpoint ? 1 : -1;
           const wanderChance = 0.45;
           const direction = rng() < wanderChance ? -towardCenter : towardCenter;
-          const stride = 1 + Math.floor(rng() * maze);
+          const stride = 1; // merge/diverge one tile at a time
           delta = direction * stride;
         }
         const next = Math.max(1, Math.min(maxCount, c + delta));
@@ -1463,7 +1472,7 @@ function buildGraphPlanUncached(seed, screenW, screenH, videos, mergeDurationMs,
     return best || [];
   }
 
-  const srcIdxPerStep = countSeq.map((cCount, si) => pickSubset(cCount, screenW, screenH, si));
+  const srcIdxPerStep = countSeq.map((cCount) => stableOrder.slice(0, cCount));
   const winnerIndex = Math.floor(rng() * n);
 
   return {
@@ -1481,6 +1490,7 @@ function buildGraphPlanUncached(seed, screenW, screenH, videos, mergeDurationMs,
     steps,
     countSeq,
     srcIdxPerStep,
+    fullRects,
     winnerIndex,
     totalSteps: countSeq.length,
     totalPhases: Math.max(1, countSeq.length * 2 - 1),
@@ -1494,13 +1504,33 @@ function buildGraphPlanUncached(seed, screenW, screenH, videos, mergeDurationMs,
  * across chunk boundaries so spatial interpolation stays continuous.
  */
 function materializePlanStep(plan, si, prevTiles) {
-  const { seed, style, screenW, screenH, videos, mergeDurationMs, countSeq, srcIdxPerStep } = plan;
-  const heroSec = plan.heroSecondaryMode === undefined ? 0 : plan.heroSecondaryMode;
+  const { mergeDurationMs, countSeq, srcIdxPerStep, fullRects } = plan;
   const cCount = countSeq[si];
   const srcIdx = srcIdxPerStep[si];
+  const N = fullRects ? fullRects.length : 0;
 
-  const aspectVideos = srcIdx.map(idx => ({ filename: videos[idx].filename, aspect: videos[idx].aspect > 0 ? videos[idx].aspect : 16 / 9 }));
-  const rects = packLayout(style, screenW, screenH, aspectVideos, mulberry32(seed ^ si), 0.1, heroSec);
+  // Derive STABLE rects from the single packed layout. Tiles 0..cCount-2 keep
+  // their full-layout cell; the last visible tile (cCount-1) absorbs the
+  // merged-away cells [cCount-1 .. N-1]. A merge therefore reads as the rightmost
+  // tile growing over its neighbours (and a diverge as it shrinking) — never a
+  // fresh re-randomization. Spatial continuity is handled by
+  // TilesPlayer.applyPhase via prevByVideo identity matching.
+  const rects = [];
+  for (let i = 0; i < cCount; i++) {
+    let r;
+    if (i < cCount - 1 && fullRects && fullRects[i]) {
+      const c = fullRects[i];
+      r = { x: c.x, y: c.y, w: c.w, h: c.h };
+    } else {
+      const cells = fullRects ? fullRects.slice(i) : [];
+      const x = Math.min(...cells.map(c => c.x));
+      const y = Math.min(...cells.map(c => c.y));
+      const x2 = Math.max(...cells.map(c => c.x + c.w));
+      const y2 = Math.max(...cells.map(c => c.y + c.h));
+      r = { x, y, w: x2 - x, h: y2 - y };
+    }
+    rects.push(r);
+  }
 
   const tiles = rects.map((r, i) => ({
     srcVideo: srcIdx[i] !== undefined ? srcIdx[i] : 0,
@@ -1512,18 +1542,7 @@ function materializePlanStep(plan, si, prevTiles) {
   if (si === 0) {
     out.push({ name: "grid", count: cCount, tiles, durationMs: 0, sharedSegmentMs: 0 });
   } else {
-    const mergedTiles = tiles.map((cur) => {
-      let from = cur.from;
-      if (prevTiles && prevTiles.length > 0) {
-        const x = Math.min(...prevTiles.map(p => p.to.x));
-        const y = Math.min(...prevTiles.map(p => p.to.y));
-        const x2 = Math.max(...prevTiles.map(p => p.to.x + p.to.w));
-        const y2 = Math.max(...prevTiles.map(p => p.to.y + p.to.h));
-        from = { x, y, w: x2 - x, h: y2 - y };
-      }
-      return { srcVideo: cur.srcVideo, from, to: cur.to };
-    });
-    out.push({ name: "converge", count: cCount, tiles: mergedTiles, prevTiles, durationMs: mergeDurationMs, sharedSegmentMs: 0 });
+    out.push({ name: "converge", count: cCount, tiles, prevTiles, durationMs: mergeDurationMs, sharedSegmentMs: 0 });
   }
 
   if (si < countSeq.length - 1) {
