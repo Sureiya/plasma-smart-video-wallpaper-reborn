@@ -236,21 +236,39 @@ function normalizeToFill(rects, screenW, screenH, maxScale) {
   if (!rects.length) {
     return rects;
   }
-  const usedW = Math.max(1, ...rects.map(r => r.x + r.w));
-  const usedH = Math.max(1, ...rects.map(r => r.y + r.h));
+  // Determine the layout's actual extent (not just max(r.x+w), which ignores a
+  // leading offset — important when the layout is staggered/scattered).
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const r of rects) {
+    if (r.x < minX) minX = r.x;
+    if (r.x + r.w > maxX) maxX = r.x + r.w;
+    if (r.y < minY) minY = r.y;
+    if (r.y + r.h > maxY) maxY = r.y + r.h;
+  }
+  const usedW = Math.max(1e-6, maxX - minX);
+  const usedH = Math.max(1e-6, maxY - minY);
+
+  // Single uniform scale that grows the layout to fill the screen, preserving
+  // every tile's aspect ratio. We scale to *cover* the larger relative gap, but
+  // never blow past maxScale (callers use a modest cap to avoid destroying the
+  // "floating"/"brick" character). The previous implementation returned early
+  // when scale <= 1, which left portrait layouts with a large empty vertical
+  // band; scaling up uniformly and re-centring fixes that without distortion.
   const scaleW = screenW / usedW;
   const scaleH = screenH / usedH;
   const scale = Math.min(Math.min(scaleW, scaleH), maxScale);
-  if (scale <= 1) {
-    return rects;
-  }
-  for (const r of rects) {
-    r.x *= scale;
-    r.y *= scale;
-    r.w *= scale;
-    r.h *= scale;
-    r.aspect = r.w / r.h;
-    r.orientation = inferAspect(r.w, r.h).orientation;
+
+  if (scale > 1) {
+    const offX = (screenW - usedW * scale) / 2 - minX * scale;
+    const offY = (screenH - usedH * scale) / 2 - minY * scale;
+    for (const r of rects) {
+      r.x = r.x * scale + offX;
+      r.y = r.y * scale + offY;
+      r.w *= scale;
+      r.h *= scale;
+      r.aspect = r.w / r.h;
+      r.orientation = inferAspect(r.w, r.h).orientation;
+    }
   }
   return rects;
 }
@@ -310,14 +328,24 @@ function overlapToFill(rects, screenW, screenH, tolerance) {
   const scaleX = screenW / spanW;
   const scaleY = screenH / spanH;
 
+  // Use a SINGLE (uniform) scale factor so every tile grows by the same amount
+  // on both axes. A per-axis (anisotropic) scale here was the bug: when the
+  // layout's bounding-box aspect differs from the screen aspect, X and Y grew by
+  // different factors, which (a) distorted every tile's aspect ratio and (b)
+  // produced gross overlap/gaps (coverage could swing from ~0.69 in portrait to
+  // ~1.6 in landscape). With a uniform scale the layout is enlarged as a rigid
+  // body, then re-centred so it fills the screen without a lopsided margin.
+  const scale = Math.min(scaleX, scaleY);
+  const offX = (screenW - spanW * scale) / 2;
+  const offY = (screenH - spanH * scale) / 2;
+
   for (const r of rects) {
-    // Map the bounding box [minX,maxX]x[minY,maxY] onto [0,screenW]x[0,screenH].
-    // Position and size share the same per-axis factor, so all tiles and all
-    // gaps scale uniformly — the result is full coverage with even spacing.
-    r.x = (r.x - minX) * scaleX;
-    r.w = r.w * scaleX;
-    r.y = (r.y - minY) * scaleY;
-    r.h = r.h * scaleY;
+    // Scale around the layout's origin, then translate so the (scaled) bounding
+    // box is centred on the screen — no tile absorbs the whole deficit.
+    r.x = (r.x - minX) * scale + offX;
+    r.w = r.w * scale;
+    r.y = (r.y - minY) * scale + offY;
+    r.h = r.h * scale;
     // Guard against accumulated float error at the exact screen edge.
     r.x = Math.max(0, Math.min(screenW - r.w, r.x));
     r.y = Math.max(0, Math.min(screenH - r.h, r.y));
@@ -385,11 +413,18 @@ function packBrick(screenW, screenH, videos, rng, tolerance) {
       // Vary width but keep it within bounds so rows pack tightly.
       const jitter = 0.85 + rng() * 0.3; // 0.85..1.15 — less extreme than before
       const w = colW * jitter;
-      const x = gutter + c * colW + stagger;
-      // Snap the cell height to THIS video's native aspect so it fills the cell
-      // exactly (no black bars). Keeps the brick look but aspect-faithful.
-      const vidAspect = videos[idx] ? videos[idx].aspect : 0;
-      const h = snapCellHeightToAspect(vidAspect, w, rowH);
+      // Clamp x so the staggered row never pushes tiles past the right edge. An
+      // overflowing stagger made the layout wider than the screen, which later
+      // forced a uniform downscale (shrink) and re-opened vertical whitespace.
+      const rawX = gutter + c * colW + stagger;
+      const x = Math.min(rawX, screenW - gutter - w);
+      // Brick rows are fixed-height. With PreserveAspectCrop the video crops to
+      // fill whatever cell it is given, so every tile in a row is exactly rowH
+      // tall (the masonry character comes from width jitter + stagger, not from
+      // per-video heights). The old snapCellHeightToAspect shrank tall cells to a
+      // portrait video's short height, leaving a hole at the bottom of each row —
+      // the portrait "giant whitespace" regression.
+      const h = rowH;
       rects.push({
         x: x,
         y: y,
@@ -562,6 +597,7 @@ function packHero(screenW, screenH, videos, rng, tolerance, heroSecondaryMode) {
     const cols = n <= 3 ? 1 : 2;           // allow a 2nd column when enough tiles
     const perCol = Math.ceil(n / cols);
     const colW = (stripW - innerGutter * (cols + 1)) / cols;
+    const colStartIdx = rects.length;
     for (let c = 0; c < cols; c++) {
       let yCursor = oy + innerGutter;
       for (let k = 0; k < perCol; k++) {
@@ -585,12 +621,34 @@ function packHero(screenW, screenH, videos, rng, tolerance, heroSecondaryMode) {
         yCursor += h + innerGutter;
       }
     }
+    // Re-normalize each column so its cells exactly fill the strip height. The
+    // per-cell clamp above bounds each cell individually but their SUM can still
+    // overshoot stripH (e.g. several portrait cells, each allowed up to 1.6x
+    // budgetH), which pushed the last tile off-screen. Scaling the column as a
+    // unit keeps aspect ratios intact and guarantees no overflow.
+    for (let c = 0; c < cols; c++) {
+      const colRects = rects.slice(colStartIdx).filter(rct => Math.abs(rct.x - (ox + innerGutter + c * (colW + innerGutter))) < 0.5);
+      if (!colRects.length) continue;
+      const totalH = colRects.reduce((s, rct) => s + rct.h, 0) + innerGutter * (colRects.length + 1);
+      if (Math.abs(totalH - stripH) > 1) {
+        const s = (stripH - innerGutter * (colRects.length + 1)) / (colRects.reduce((sum, rct) => sum + rct.h, 0) || 1);
+        let yy = oy + innerGutter;
+        for (const rct of colRects) {
+          rct.h *= s;
+          rct.y = yy;
+          rct.aspect = rct.w / rct.h;
+          rct.orientation = inferAspect(rct.w, rct.h).orientation;
+          yy += rct.h + innerGutter;
+        }
+      }
+    }
   } else {
     // Row-wise: flow tiles left-to-right to fill the strip width completely.
     const n = others.length;
     const rows = n <= 2 ? 1 : (n <= 4 ? 2 : Math.round(Math.sqrt(n)));
     const perRow = Math.ceil(n / rows);
     const rowH = (stripH - innerGutter * (rows + 1)) / rows;
+    const rowStartIdx = rects.length;
     for (let r = 0; r < rows; r++) {
       let xCursor = ox + innerGutter;
       for (let k = 0; k < perRow; k++) {
@@ -611,6 +669,26 @@ function packHero(screenW, screenH, videos, rng, tolerance, heroSecondaryMode) {
           videoIndex: i + 1,
         });
         xCursor += w + innerGutter;
+      }
+    }
+    // Re-normalize each row so its cells exactly fill the strip width, mirroring
+    // the column normalization above. Individual cell widths (capped 0.45..1.6x
+    // budget) can sum past stripW on wide strips, pushing the last tile
+    // off-screen; scaling the row as a unit prevents that.
+    for (let r = 0; r < rows; r++) {
+      const rowRects = rects.slice(rowStartIdx).filter(rct => Math.abs(rct.y - (oy + innerGutter + r * (rowH + innerGutter))) < 0.5);
+      if (!rowRects.length) continue;
+      const totalW = rowRects.reduce((s, rct) => s + rct.w, 0) + innerGutter * (rowRects.length + 1);
+      if (Math.abs(totalW - stripW) > 1) {
+        const s = (stripW - innerGutter * (rowRects.length + 1)) / (rowRects.reduce((sum, rct) => sum + rct.w, 0) || 1);
+        let xx = ox + innerGutter;
+        for (const rct of rowRects) {
+          rct.w *= s;
+          rct.x = xx;
+          rct.aspect = rct.w / rct.h;
+          rct.orientation = inferAspect(rct.w, rct.h).orientation;
+          xx += rct.w + innerGutter;
+        }
       }
     }
   }
@@ -747,6 +825,22 @@ function packBands(screenW, screenH, videos, rng, tolerance) {
           videoIndex: idx,
         });
         x += w;
+      }
+      // Re-normalize the row so stacked cells exactly fill the screen width,
+      // mirroring the vertical column normalization below. Without this the
+      // varied `w` values (capped 0.5..1.5 × budget) don't sum to screenW, which
+      // left a large empty band on the right side (the "one-sided whitespace").
+      const rowRects = rects.filter(rect => rect.y === r * rowH);
+      const totalW = rowRects.reduce((s, rect) => s + rect.w, 0) || 1;
+      if (Math.abs(totalW - screenW) > 1) {
+        let xx = 0;
+        for (const rect of rowRects) {
+          rect.w = (rect.w / totalW) * screenW;
+          rect.x = xx;
+          rect.aspect = rect.w / rect.h;
+          rect.orientation = inferAspect(rect.w, rect.h).orientation;
+          xx += rect.w;
+        }
       }
     }
   } else {
