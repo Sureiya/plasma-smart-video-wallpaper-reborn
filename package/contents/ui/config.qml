@@ -917,6 +917,8 @@ ColumnLayout {
                 to: 16
                 stepSize: 1
                 editable: true
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Maximum number of videos shown simultaneously as tiles. More tiles are more GPU/CPU intensive — keep this modest on weaker systems.")
+                ToolTip.visible: hovered
             }
         }
 
@@ -929,6 +931,8 @@ ColumnLayout {
                 to: 10000
                 stepSize: 50
                 editable: true
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "How long (in milliseconds) the merge/converge animation takes when tiles combine into fewer, larger tiles.")
+                ToolTip.visible: hovered
             }
         }
 
@@ -941,6 +945,8 @@ ColumnLayout {
                 to: 100
                 stepSize: 1
                 editable: true
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "How much a tile may stretch/crop to fill gaps and match the screen. Higher values allow more overlap and less black space at the cost of aspect accuracy.")
+                ToolTip.visible: hovered
             }
         }
 
@@ -953,6 +959,8 @@ ColumnLayout {
                 to: 12
                 stepSize: 1
                 editable: true
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "How many converge/merge steps happen before the tiles reach a single full-screen tile.")
+                ToolTip.visible: hovered
             }
         }
 
@@ -965,6 +973,8 @@ ColumnLayout {
                 to: 60
                 stepSize: 1
                 editable: true
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Shortest length (in seconds) of the video excerpt played in each tile before a transform happens.")
+                ToolTip.visible: hovered
             }
         }
 
@@ -977,6 +987,8 @@ ColumnLayout {
                 to: 120
                 stepSize: 1
                 editable: true
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Longest length (in seconds) of the video excerpt played in each tile before a transform happens.")
+                ToolTip.visible: hovered
             }
         }
 
@@ -1005,6 +1017,8 @@ ColumnLayout {
                 Component.onCompleted: {
                     currentIndex = model.findIndex(m => m.value === root.cfg_TilesChoreographyMode);
                 }
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "How the tiles evolve over time: <strong>Merge to one</strong> fuses tiles into a single full-screen tile; <strong>Maze walk</strong> walks the tile count up and down (breathes) while trending toward one; <strong>Reset</strong> collapses and then restarts with a new seed.")
+                ToolTip.visible: hovered
             }
         }
 
@@ -1053,12 +1067,18 @@ ColumnLayout {
                 Component.onCompleted: {
                     currentIndex = model.findIndex(style => style.value === root.cfg_TilesLayoutStyle);
                 }
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "How tiles are arranged on screen. <strong>Random</strong> picks a different style at the start of each cycle.")
+                ToolTip.visible: hovered
             }
         }
 
         CheckBox {
             id: tilesRandomizeCheckbox
             Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Randomize tiles each cycle:")
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+        }
+        Kirigami.ContextualHelpButton {
+            toolTipText: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Reshuffle which videos appear in each tile at the start of every cycle. Disable to keep the same videos (deterministic) across cycles.")
             visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
         }
 
@@ -1240,6 +1260,8 @@ ColumnLayout {
                 to: 100
                 stepSize: 1
                 editable: true
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Pause playback when visible windows cover more than this percentage of the screen (measured per monitor).")
+                ToolTip.visible: hovered
             }
         }
 
