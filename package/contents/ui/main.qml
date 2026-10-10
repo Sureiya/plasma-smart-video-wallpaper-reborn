@@ -215,7 +215,12 @@ WallpaperItem {
     // shared video library into disjoint slices.
     property int tilesMonitorRank: 0
     property int tilesMonitorCount: 1
-    readonly property string _monitorRegistryDir: main.folderCacheStore.cacheDir + "/monitors"
+    // Deferred so it only dereferences folderCacheStore (instantiated later in
+    // the file) when actually called, avoiding a "cacheDir of undefined" at
+    // property-binding time.
+    function monitorRegistryDir() {
+        return main.folderCacheStore.cacheDir + "/monitors";
+    }
     readonly property int _monitorRankX: {
         const g = (Plasmoid && Plasmoid.screenGeometry) ? Plasmoid.screenGeometry : null;
         return g ? Math.round(g.x !== undefined ? g.x : 0) : 0;
@@ -522,7 +527,7 @@ WallpaperItem {
     function refreshMonitorRegistry() {
         if (!main.tilesMode) return;
         const id = (Plasmoid && Plasmoid.id !== undefined) ? String(Plasmoid.id) : "0";
-        const dir = main._monitorRegistryDir;
+        const dir = main.monitorRegistryDir();
         const frag = dir + "/" + id + ".json";
         const entry = JSON.stringify({ id: id, x: main._monitorRankX, y: main._monitorRankY });
         // local shellQuote helper (same escaping as CacheStore).
