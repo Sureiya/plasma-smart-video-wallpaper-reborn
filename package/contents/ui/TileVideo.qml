@@ -1,13 +1,14 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import QtMultimedia
-import "code/utils.js" as Utils
+import com.github.luisbocanegra.svwr 1.0
 
 /*
- * A single animated video tile for Tiles mode. Wraps a VideoPlayer and drives
- * its geometry (x/y/width/height) from the precomputed transformation graph.
- * The video is cropped to the tile so that, when the tile converges to
- * full-screen during the merge, the frame is seamless.
+ * A single animated video tile for Tiles mode. Decodes via the native
+ * CappedVideoPlayer (GStreamer, capped to maxDecodeWidth/Height) and displays
+ * through a VideoOutput bound to its videoSink. Geometry (x/y/width/height) is
+ * driven from the precomputed transformation graph. The video is cropped to the
+ * tile (PreserveAspectCrop) so frames are seamless during the merge.
  */
 Item {
     id: root
@@ -25,6 +26,11 @@ Item {
     property bool debugEnabled: false
     property int loadAheadTime: 0
 
+    // Decode cap (set by TilesPlayer from monitor resolution: 1080p on 4K, 720p
+    // on 1080p). CappedVideoPlayer decodes/scale to at most this size.
+    property int maxDecodeWidth: 1280
+    property int maxDecodeHeight: 720
+
     // Geometry (driven by the transformation graph). These are set directly
     // by TilesPlayer each frame rather than being animated internally, so the
     // whole graph stays deterministic and coordinated.
@@ -33,47 +39,53 @@ Item {
     property real tileW: 0
     property real tileH: 0
 
-    // -- Outputs (read by TilesPlayer) --
-    readonly property alias duration: player.duration
-    readonly property alias position: player.position
-    readonly property real videoAspect: player.videoAspect
-
     x: tileX
     y: tileY
     width: tileW
     height: tileH
     clip: true
 
-    VideoPlayer {
+    // Native capped decoder (GStreamer playbin -> videoconvert -> videoscale ->
+    // capsfilter -> appsink), feeding frames to QVideoSink at <= the cap.
+    CappedVideoPlayer {
         id: player
+        source: root.videoSource ? root.videoSource.filename : ""
+        maxWidth: root.maxDecodeWidth
+        maxHeight: root.maxDecodeHeight
+        loops: true
+    }
+
+    VideoOutput {
+        id: videoOutput
         anchors.fill: parent
-        playerSource: root.videoSource
-        globalVolume: root.globalVolume
-        muted: root.muted
         fillMode: root.fillMode
-        fillBlur: root.fillBlur
-        fillBlurRadius: root.fillBlurRadius
-        audioOutputDevice: root.audioOutputDevice
-        globalPlaybackRate: root.globalPlaybackRate
-        useAlternativePlaybackRate: false
-        crossfadeEnabled: false
-        changeWallpaperMode: false
-        randomStartTime: false
-        loops: MediaPlayer.Infinite
-        shouldPlay: root.shouldPlay
-        debugEnabled: root.debugEnabled
-        loadAheadTime: root.loadAheadTime
-        // Tiles are the many-decoders case: when the desktop is covered, free
-        // each tile's decoded frame + GPU texture instead of just pausing. This
-        // is what drops VRAM to ~0 when offscreen. Tiles loop infinitely so
-        // losing exact position on resume is acceptable.
-        releaseFrameOnPause: true
+        videoSink: player.videoSink
+    }
+
+    onShouldPlayChanged: {
+        if (root.shouldPlay) {
+            player.play();
+        } else {
+            // Full stop frees the decoded frame + GPU texture (tiles loop, so
+            // losing position on resume is fine).
+            player.stop();
+        }
+    }
+
+    onVideoSourceChanged: {
+        if (root.shouldPlay) {
+            player.play();
+        }
+    }
+
+    Component.onCompleted: {
+        if (root.shouldPlay) {
+            player.play();
+        }
     }
 
     function seek(ms) {
-        if (player.seekable) {
-            player.position = ms;
-        }
+        player.seek(ms);
     }
 
     function play() {

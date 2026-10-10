@@ -213,6 +213,9 @@ Item {
             audioOutputDevice: root.audioOutputDevice
             shouldPlay: root.shouldPlay
             debugEnabled: root.debugEnabled
+            // Monitor-resolution-scaled decode cap (1080p on 4K, 720p on 1080p).
+            maxDecodeWidth: root.maxDecodeWidth
+            maxDecodeHeight: root.maxDecodeHeight
         }
     }
 

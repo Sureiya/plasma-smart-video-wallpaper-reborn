@@ -82,6 +82,10 @@ public:
     // Used internally (and by the appsink callback) to advance the position.
     void updatePosition(qint64 pos);
 
+    // Called from the caps probe once the source dimensions are known; computes
+    // an aspect-preserving target <= (maxWidth,maxHeight) and sets the capsfilter.
+    void applyAspectCap(int srcW, int srcH);
+
 public slots:
     void play();
     void pause();
@@ -118,7 +122,8 @@ private:
     GstElement *m_pipeline = nullptr;
     GstElement *m_playbin = nullptr;
     GstElement *m_appsink = nullptr;
-    guint m_busWatchId = 0;
+    GstElement *m_capsfilter = nullptr;
+    GstBus *m_bus = nullptr;
 };
 
 #endif // CAPPEDVIDEOPLAYER_H

@@ -8,9 +8,11 @@
 
 #include <QAbstractVideoBuffer>
 #include <QDebug>
+#include <QFileInfo>
 #include <QVideoFrame>
 #include <QVideoFrameFormat>
 #include <QVideoSink>
+#include <QtMath>
 
 #include <gst/video/video-frame.h>
 
@@ -58,6 +60,22 @@ void CappedVideoPlayer::setSource(const QUrl &source)
     m_source = source;
     emit sourceChanged();
     buildPipeline();
+}
+
+// Normalize a QUrl to an absolute file:// URI for GStreamer's playbin "uri"
+// property. Handles bare absolute/relative paths and file:// URLs.
+static QByteArray toGstUri(const QUrl &url)
+{
+    QUrl u = url;
+    if (u.isRelative() || u.scheme().isEmpty()) {
+        // A bare filesystem path (possibly relative) -> resolve to file://.
+        if (u.path().startsWith('/')) {
+            u = QUrl::fromLocalFile(u.path());
+        } else {
+            u = QUrl::fromLocalFile(QFileInfo(u.path()).absoluteFilePath());
+        }
+    }
+    return u.toEncoded();
 }
 
 void CappedVideoPlayer::setVideoSink(QVideoSink *sink)
@@ -219,6 +237,82 @@ static GstFlowReturn newSampleHandler(GstAppSink *appsink, gpointer data)
     return GST_FLOW_OK;
 }
 
+// Synchronous bus handler (streaming thread). We must NOT use gst_bus_add_watch:
+// that installs a GSource on the GLib main context, which Qt/QML never iterates,
+// so EOS/error would never fire. The sync handler runs on the streaming thread
+// whenever a message is posted, so we marshal to the Qt main thread.
+static GstBusSyncReply busSyncHandler(GstBus *, GstMessage *msg, gpointer data)
+{
+    auto *self = static_cast<CappedVideoPlayer *>(data);
+    switch (GST_MESSAGE_TYPE(msg)) {
+    case GST_MESSAGE_EOS:
+        QMetaObject::invokeMethod(self, [self]() {
+            if (self->loops()) {
+                self->seek(0);
+                self->play();
+            } else {
+                self->stop();
+            }
+        }, Qt::QueuedConnection);
+        break;
+    case GST_MESSAGE_ERROR: {
+        GError *err = nullptr;
+        gchar *dbg = nullptr;
+        gst_message_parse_error(msg, &err, &dbg);
+        qWarning() << "CappedVideoPlayer error:" << (err ? err->message : "unknown")
+                   << (dbg ? dbg : "");
+        g_clear_error(&err);
+        g_free(dbg);
+        QMetaObject::invokeMethod(self, [self]() { self->stop(); }, Qt::QueuedConnection);
+        break;
+    }
+    default:
+        break;
+    }
+    return GST_BUS_PASS;
+}
+
+// Probe the sink pad's caps to learn the decoded source dimensions, then set an
+// aspect-preserving RGBA cap so videoscale/videoconvert downscale to a resolution
+// <= (maxWidth,maxHeight) WITHOUT distorting the frame.
+static GstPadProbeReturn capsProbe(GstPad *, GstPadProbeInfo *info, gpointer data)
+{
+    if (!(GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM)) {
+        return GST_PAD_PROBE_OK;
+    }
+    GstEvent *ev = GST_PAD_PROBE_INFO_EVENT(info);
+    if (GST_EVENT_TYPE(ev) != GST_EVENT_CAPS) {
+        return GST_PAD_PROBE_OK;
+    }
+    GstCaps *caps = nullptr;
+    gst_event_parse_caps(ev, &caps);
+    if (!caps) {
+        return GST_PAD_PROBE_OK;
+    }
+    GstVideoInfo vi;
+    if (gst_video_info_from_caps(&vi, caps)) {
+        static_cast<CappedVideoPlayer *>(data)->applyAspectCap(vi.width, vi.height);
+    }
+    return GST_PAD_PROBE_REMOVE;
+}
+
+void CappedVideoPlayer::applyAspectCap(int srcW, int srcH)
+{
+    if (!m_capsfilter || srcW <= 0 || srcH <= 0) {
+        return;
+    }
+    const double s = qMin(1.0, qMin(double(m_maxWidth) / srcW, double(m_maxHeight) / srcH));
+    const int tw = qMax(1, qRound(srcW * s));
+    const int th = qMax(1, qRound(srcH * s));
+    GstCaps *caps = gst_caps_new_simple("video/x-raw",
+                                        "format", G_TYPE_STRING, "RGBA",
+                                        "width", G_TYPE_INT, tw,
+                                        "height", G_TYPE_INT, th,
+                                        nullptr);
+    g_object_set(G_OBJECT(m_capsfilter), "caps", caps, nullptr);
+    gst_caps_unref(caps);
+}
+
 void CappedVideoPlayer::buildPipeline()
 {
     teardownPipeline();
@@ -233,68 +327,41 @@ void CappedVideoPlayer::buildPipeline()
 
     GstElement *convert = gst_element_factory_make("videoconvert", "convert");
     GstElement *scale = gst_element_factory_make("videoscale", "scale");
-    GstElement *filter = gst_element_factory_make("capsfilter", "cap");
-    if (!m_playbin || !m_appsink || !convert || !scale || !filter) {
+    m_capsfilter = gst_element_factory_make("capsfilter", "cap");
+    if (!m_playbin || !m_appsink || !convert || !scale || !m_capsfilter) {
         qWarning() << "CappedVideoPlayer: could not create pipeline elements";
         teardownPipeline();
         return;
     }
 
-    GstCaps *caps = gst_caps_new_simple("video/x-raw",
-                                        "width", G_TYPE_INT, m_maxWidth,
-                                        "height", G_TYPE_INT, m_maxHeight,
-                                        nullptr);
-    g_object_set(G_OBJECT(filter), "caps", caps, nullptr);
-    gst_caps_unref(caps);
-
     GstElement *bin = gst_bin_new("sink-bin");
-    gst_bin_add_many(GST_BIN(bin), convert, scale, filter, m_appsink, nullptr);
-    gst_element_link_many(convert, scale, filter, m_appsink, nullptr);
+    gst_bin_add_many(GST_BIN(bin), convert, scale, m_capsfilter, m_appsink, nullptr);
+    gst_element_link_many(convert, scale, m_capsfilter, m_appsink, nullptr);
 
     GstPad *sinkpad = gst_element_get_static_pad(convert, "sink");
     GstPad *ghost = gst_ghost_pad_new("sink", sinkpad);
     gst_element_add_pad(bin, ghost);
     gst_object_unref(sinkpad);
 
+    // Learn the decoded source dimensions from the caps so we cap aspect-preservingly.
+    GstPad *convertSink = gst_element_get_static_pad(convert, "sink");
+    gst_pad_add_probe(convertSink,
+                      static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM),
+                      capsProbe, this, nullptr);
+    gst_object_unref(convertSink);
+
     g_object_set(G_OBJECT(m_appsink), "emit-signals", TRUE, nullptr);
     g_signal_connect(m_appsink, "new-sample", G_CALLBACK(newSampleHandler), this);
 
     g_object_set(G_OBJECT(m_playbin), "video-sink", bin, nullptr);
-    g_object_set(G_OBJECT(m_playbin), "uri", QUrl(m_source).toEncoded().constData(), nullptr);
-    g_object_set(G_OBJECT(m_playbin), "mute", TRUE, nullptr);
+    g_object_set(G_OBJECT(m_playbin), "uri", toGstUri(m_source).constData(), nullptr);
+    // Video only: tiles are muted, so drop audio decode entirely (no audio sink).
+    g_object_set(G_OBJECT(m_playbin), "flags", 1 /* GST_PLAY_FLAG_VIDEO */, nullptr);
 
     gst_bin_add(GST_BIN(m_pipeline), m_playbin);
 
-    GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(m_pipeline));
-    m_busWatchId = gst_bus_add_watch(bus, [](GstBus *, GstMessage *msg, gpointer data) -> gboolean {
-        auto *self = static_cast<CappedVideoPlayer *>(data);
-        switch (GST_MESSAGE_TYPE(msg)) {
-        case GST_MESSAGE_EOS:
-            QMetaObject::invokeMethod(self, [self]() {
-                if (self->loops()) {
-                    self->seek(0);
-                    self->play();
-                } else {
-                    self->stop();
-                }
-            }, Qt::QueuedConnection);
-            break;
-        case GST_MESSAGE_ERROR: {
-            GError *err = nullptr;
-            gchar *dbg = nullptr;
-            gst_message_parse_error(msg, &err, &dbg);
-            qWarning() << "CappedVideoPlayer error:" << (err ? err->message : "unknown");
-            g_clear_error(&err);
-            g_free(dbg);
-            QMetaObject::invokeMethod(self, [self]() { self->stop(); }, Qt::QueuedConnection);
-            break;
-        }
-        default:
-            break;
-        }
-        return TRUE;
-    }, this);
-    gst_object_unref(bus);
+    m_bus = gst_pipeline_get_bus(GST_PIPELINE(m_pipeline));
+    gst_bus_set_sync_handler(m_bus, busSyncHandler, this, nullptr);
 
     m_mediaStatus = 3; // LoadedMedia
     emit mediaStatusChanged();
@@ -315,16 +382,16 @@ void CappedVideoPlayer::teardownPipeline()
 {
     if (m_pipeline) {
         gst_element_set_state(m_pipeline, GST_STATE_NULL);
-        if (m_busWatchId) {
-            GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(m_pipeline));
-            gst_bus_remove_watch(bus);
-            gst_object_unref(bus);
-            m_busWatchId = 0;
+        if (m_bus) {
+            gst_bus_set_sync_handler(m_bus, nullptr, nullptr, nullptr);
+            gst_object_unref(m_bus);
+            m_bus = nullptr;
         }
         gst_object_unref(m_pipeline);
         m_pipeline = nullptr;
         m_playbin = nullptr;
         m_appsink = nullptr;
+        m_capsfilter = nullptr;
     }
     m_duration = 0;
     m_position = 0;
