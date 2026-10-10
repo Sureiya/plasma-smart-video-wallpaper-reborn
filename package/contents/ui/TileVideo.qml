@@ -38,9 +38,6 @@ Item {
     readonly property alias position: player.position
     readonly property real videoAspect: player.videoAspect
 
-    // Planned end-of-segment (ms) set by TilesPlayer's segment scheduler.
-    property int _segmentEndMs: 0
-
     x: tileX
     y: tileY
     width: tileW

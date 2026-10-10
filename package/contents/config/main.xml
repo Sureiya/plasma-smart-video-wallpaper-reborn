@@ -14,14 +14,6 @@
       <label>Folder paths to enumerate recursively</label>
       <default>[]</default>
     </entry>
-    <entry name="FolderCache" type="String">
-      <label>JSON cache of enumerated video files per folder</label>
-      <default>{}</default>
-    </entry>
-    <entry name="VideoMetadataCache" type="String">
-      <label>JSON cache of per-video metadata (aspect, resolution, duration)</label>
-      <default>{}</default>
-    </entry>
     <entry name="BackgroundColor" type="String">
       <label>Background color</label>
       <default>#000000</default>
@@ -276,6 +268,14 @@
     <entry name="TilesChoreographyMode" type="Int">
       <label>Tile choreography (0=merge to one, 1=maze walk)</label>
       <default>0</default>
+    </entry>
+    <entry name="TilesHeroSecondaryMode" type="Int">
+      <label>Hero secondary layout (0=side grid, 1=brick, 2=columns, 3=rows, 4=mosaic, 5=collage, 6=random)</label>
+      <default>0</default>
+    </entry>
+    <entry name="TilesMazeSize" type="Int">
+      <label>Maze walk size: size of the tile-count state space the walker roams (directs wander breadth)</label>
+      <default>5</default>
     </entry>
   </group>
 </kcfg>

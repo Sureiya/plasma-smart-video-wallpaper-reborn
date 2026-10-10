@@ -269,6 +269,20 @@ function parseMetadataCache(json) {
 }
 
 /**
+ * Parse a JSON string into a plain object, returning {} on any error or when
+ * the parsed result is not a non-array object. Used to safely load cache files.
+ */
+function safeJsonObject(json) {
+  if (!json) return {};
+  try {
+    const c = JSON.parse(json);
+    return (c && typeof c === "object" && !Array.isArray(c)) ? c : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+/**
  * Look up cached metadata for a video path, returning {aspect,width,height,duration}
  * or null when unknown.
  */

@@ -55,7 +55,6 @@ ColumnLayout {
     property alias cfg_BlurRadius: blurRadiusSpinBox.value
     property string cfg_VideoUrls
     property string cfg_Folders
-    property string cfg_FolderCache
     property bool isLoading: false
     property alias cfg_ScreenOffPausesVideo: screenOffPausesVideoCheckbox.checked
     property alias cfg_ScreenStateCmd: screenStateCmdTextField.text
@@ -103,6 +102,8 @@ ColumnLayout {
     property alias cfg_TilesSegmentMinS: tilesSegmentMinSpinBox.value
     property alias cfg_TilesSegmentMaxS: tilesSegmentMaxSpinBox.value
     property int cfg_TilesChoreographyMode: 0
+    property int cfg_TilesHeroSecondaryMode: 0
+    property alias cfg_TilesMazeSize: tilesMazeSizeSpinBox.value
     property alias cfg_FillBlur: blurRadioButton.checked
     property alias cfg_FillBlurRadius: fillBlurRadius.value
     property alias currentTab: tabBar.currentIndex
@@ -951,7 +952,13 @@ ColumnLayout {
         }
 
         RowLayout {
-            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+            // This step-count only applies to the deterministic counting
+            // choreographies (Merge to one / Reset). Maze walk decides its own
+            // number of steps algorithmically, so hiding it there keeps the UI
+            // from showing an irrelevant (and confusing) option.
+            visible: root.currentTab === 1
+                && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+                && tilesChoreographyComboBox.currentValue !== Enum.TilesChoreographyMode.MazeWalk
             Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Transforms before full screen:")
             SpinBox {
                 id: tilesTransformsSpinBox
@@ -1023,6 +1030,22 @@ ColumnLayout {
         }
 
         RowLayout {
+            visible: root.currentTab === 1
+                && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+                && tilesChoreographyComboBox.currentValue === Enum.TilesChoreographyMode.MazeWalk
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Maze size:")
+            SpinBox {
+                id: tilesMazeSizeSpinBox
+                from: 1
+                to: 20
+                stepSize: 1
+                editable: true
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Size of the maze the walker roams (how broadly the tile count wanders each step while maze-walking). Larger makes a longer, more varied cycle; smaller keeps it tight and quick. The seed still makes the exact path non-deterministic.")
+                ToolTip.visible: hovered
+            }
+        }
+
+        RowLayout {
             visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
             Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Layout style:")
             ComboBox {
@@ -1068,6 +1091,54 @@ ColumnLayout {
                     currentIndex = model.findIndex(style => style.value === root.cfg_TilesLayoutStyle);
                 }
                 ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "How tiles are arranged on screen. <strong>Random</strong> picks a different style at the start of each cycle.")
+                ToolTip.visible: hovered
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1
+                && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+                && tilesLayoutStyleComboBox.currentValue === Enum.TilesLayoutStyle.Hero
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Hero secondary layout:")
+            ComboBox {
+                id: tilesHeroSecondaryComboBox
+                model: [
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Side grid"),
+                        value: Enum.TilesHeroSecondaryMode.SideGrid
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Brick"),
+                        value: Enum.TilesHeroSecondaryMode.Brick
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Columns"),
+                        value: Enum.TilesHeroSecondaryMode.Columns
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Rows"),
+                        value: Enum.TilesHeroSecondaryMode.Rows
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Mosaic"),
+                        value: Enum.TilesHeroSecondaryMode.Mosaic
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Collage"),
+                        value: Enum.TilesHeroSecondaryMode.Collage
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Random"),
+                        value: Enum.TilesHeroSecondaryMode.Random
+                    }
+                ]
+                textRole: "text"
+                valueRole: "value"
+                onActivated: root.cfg_TilesHeroSecondaryMode = currentValue
+                Component.onCompleted: {
+                    currentIndex = model.findIndex(m => m.value === root.cfg_TilesHeroSecondaryMode);
+                }
+                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "How the smaller (non-dominant) tiles are arranged in <strong>Hero</strong> layout. Choose <strong>Random</strong> to let it pick a different secondary mode each cycle.")
                 ToolTip.visible: hovered
             }
         }
@@ -2335,10 +2406,20 @@ ColumnLayout {
                                 icon.name: "list-remove-symbolic"
                                 icon.color: Kirigami.Theme.negativeTextColor
                                 onClicked: {
+                                    // Folder rows hold their own cached file index and the
+                                    // `Folders` config entry; removing one must go through
+                                    // removeFolder() so both are cleaned up. Removing a plain
+                                    // (non-folder) video only needs the list entry removed.
                                     confirmationDialog.title = i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Remove media?");
-                                    confirmationDialog.callback = () => {
-                                        videosModel.removeItem(itemDelegate.index, 1);
-                                    };
+                                    if (itemDelegate.folder === true) {
+                                        confirmationDialog.callback = () => {
+                                            root.removeFolder(itemDelegate.filename);
+                                        };
+                                    } else {
+                                        confirmationDialog.callback = () => {
+                                            videosModel.removeItem(itemDelegate.index);
+                                        };
+                                    }
                                     confirmationDialog.open();
                                 }
                                 Layout.fillHeight: true
@@ -2444,6 +2525,13 @@ ColumnLayout {
         id: folderEnumCommand
     }
 
+    // Folder enumeration cache, persisted to its own file (not the wallpaper
+    // KConfig). Written here; read by the wallpaper's main.qml.
+    CacheStore {
+        id: folderCacheStore
+        fileName: "folder-cache.json"
+    }
+
     // Signal emitted after a folder has been enumerated so the UI can refresh.
     signal foldersChanged
 
@@ -2483,7 +2571,8 @@ ColumnLayout {
             const files = out.split("\n").map(f => f.trim()).filter(f => f.length > 0).map(f => "file://" + f);
             console.log("[SVWR] enumerateFolder found files:", files.length);
             cache[folder] = files;
-            root.cfg_FolderCache = JSON.stringify(cache);
+            folderCacheStore.cache = cache;
+            folderCacheStore.save();
             root.saveFolder(folder);
             root.folderEnumStatus = i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Added %1 video(s)").arg(files.length);
             root.foldersChanged();
@@ -2495,12 +2584,8 @@ ColumnLayout {
     }
 
     function parseFolderCache() {
-        try {
-            const c = JSON.parse(root.cfg_FolderCache || "{}");
-            return (c && typeof c === "object" && !Array.isArray(c)) ? c : {};
-        } catch (e) {
-            return {};
-        }
+        const c = folderCacheStore.cache;
+        return (c && typeof c === "object" && !Array.isArray(c)) ? c : {};
     }
 
     function saveFolder(folder) {
@@ -2520,7 +2605,8 @@ ColumnLayout {
     function removeFolder(path) {
         const cache = root.parseFolderCache();
         delete cache[path];
-        root.cfg_FolderCache = JSON.stringify(cache);
+        folderCacheStore.cache = cache;
+        folderCacheStore.save();
         try {
             let folders = JSON.parse(root.cfg_Folders || "[]");
             if (!Array.isArray(folders)) folders = [];

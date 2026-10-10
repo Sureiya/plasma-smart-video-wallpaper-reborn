@@ -35,6 +35,16 @@ const TilesChoreographyMode = {
   Reset: 2,
 };
 
+const TilesHeroSecondaryMode = {
+  SideGrid: 0,
+  Brick: 1,
+  Columns: 2,
+  Rows: 3,
+  Mosaic: 4,
+  Collage: 5,
+  Random: 6,
+};
+
 const DayNightPhase = {
   Night: 0,
   Sunrise: 1,

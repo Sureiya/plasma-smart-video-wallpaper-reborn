@@ -38,7 +38,11 @@ WallpaperItem {
     property bool isLoading: true
     property string videoUrls: main.configuration.VideoUrls
     property string folders: main.configuration.Folders
-    property string folderCache: main.configuration.FolderCache
+    // FolderCache no longer lives in the wallpaper KConfig; it is loaded from a
+    // dedicated cache file by folderCacheStore and reflected here as a JSON
+    // string so the rest of the plugin keeps working unchanged.
+    property string folderCache: "{}"
+    property string metadataCache: "{}"
     property list<var> videosConfig: []
     property var randomOrder: []            // shuffled index permutation for random mode
     property string lastRandomSignature: ""  // fingerprint of the current file set
@@ -197,9 +201,29 @@ WallpaperItem {
     property int tilesLayoutStyle: main.configuration.TilesLayoutStyle
     property int tilesTransformsBeforeFull: main.configuration.TilesTransformsBeforeFull
     property int tilesChoreographyMode: main.configuration.TilesChoreographyMode
+    property int tilesHeroSecondaryMode: main.configuration.TilesHeroSecondaryMode
+    property int tilesMazeSize: main.configuration.TilesMazeSize
     property int tilesSegmentMinMs: main.configuration.TilesSegmentMinS * 1000
     property int tilesSegmentMaxMs: main.configuration.TilesSegmentMaxS * 1000
     readonly property bool tilesMode: main.changeWallpaperMode === Enum.ChangeWallpaperMode.Tiles
+
+    // Cross-monitor coordination for Tiles mode: two wallpapers on different
+    // screens must never play the same video simultaneously. Each instance
+    // registers itself (containment id + screen position) into a shared registry
+    // file under the cache dir, then reads back the merged list to compute its
+    // rank (0 = leftmost) and the total monitor count. Rank/count partition the
+    // shared video library into disjoint slices.
+    property int tilesMonitorRank: 0
+    property int tilesMonitorCount: 1
+    readonly property string _monitorRegistryDir: main.folderCacheStore.cacheDir + "/monitors"
+    readonly property int _monitorRankX: {
+        const g = (Plasmoid && Plasmoid.screenGeometry) ? Plasmoid.screenGeometry : null;
+        return g ? Math.round(g.x !== undefined ? g.x : 0) : 0;
+    }
+    readonly property int _monitorRankY: {
+        const g = (Plasmoid && Plasmoid.screenGeometry) ? Plasmoid.screenGeometry : null;
+        return g ? Math.round(g.y !== undefined ? g.y : 0) : 0;
+    }
     property bool dayNightCycleEnabled: main.configuration.DayNightCycleMode !== Enum.DayNightCycleMode.Disabled
     property bool muteAudio: {
         if (muteOverride === Enum.MuteOverride.Mute) {
@@ -279,7 +303,20 @@ WallpaperItem {
 
     TasksModel {
         id: windowModel
-        screenGeometry: main.parent?.screenGeometry ?? null
+        // Prefer Plasmoid.screenGeometry, which is always populated for the
+        // containing screen even in a wallpaper where main.parent is the
+        // Containment and may not expose screenGeometry. Falls back to the
+        // parent's geometry, then to a local (0,0,width,height) rect so the
+        // coverage calculation never gets a null screen.
+        screenGeometry: {
+            if (Plasmoid && Plasmoid.screenGeometry && Plasmoid.screenGeometry.width > 0) {
+                return Plasmoid.screenGeometry;
+            }
+            if (main.parent && main.parent.screenGeometry && main.parent.screenGeometry.width > 0) {
+                return main.parent.screenGeometry;
+            }
+            return Qt.rect(0, 0, main.width, main.height);
+        }
         filterByScreen: main.configuration.CheckWindowsActiveScreen
     }
 
@@ -388,6 +425,143 @@ WallpaperItem {
         }
     }
 
+    // Folder enumeration cache, loaded from its own file (not the wallpaper
+    // KConfig). Written by the runtime enumerator below (and, historically, by the
+    // config dialog); read here so folder videos are available without a manual
+    // re-enumeration step.
+    CacheStore {
+        id: folderCacheStore
+        fileName: "folder-cache.json"
+        onCacheLoaded: cache => {
+            main.folderCache = JSON.stringify(cache);
+            main.ensureFolderCache(cache);
+        }
+    }
+
+    // Runtime, background folder enumeration. When the wallpaper starts (or the
+    // Folders list changes), any folder that is not yet indexed is enumerated with
+    // `find` in the background and its file list is written back into the cache
+    // file, so folder videos populate automatically without opening the config
+    // dialog. One folder at a time; guarded against re-entry.
+    RunCommand {
+        id: folderEnumCommand
+    }
+    property var _pendingFolders: []
+    property bool _enumeratingFolder: false
+
+    function ensureFolderCache(cache) {
+        // Parse configured folders; find the first one missing (or empty) in the
+        // cache and enumerate it. Queue the rest for sequential processing.
+        let folders = [];
+        try {
+            folders = JSON.parse(main.folders || "[]");
+            if (!Array.isArray(folders)) folders = [];
+        } catch (e) {
+            folders = [];
+        }
+        const missing = [];
+        for (const f of folders) {
+            const c = cache && cache[f];
+            if (!Array.isArray(c) || c.length === 0) missing.push(f);
+        }
+        if (missing.length === 0) return;
+        main._pendingFolders = missing.slice();
+        main.enumerateNextFolder();
+    }
+
+    function enumerateNextFolder() {
+        if (main._enumeratingFolder) return;
+        while (main._pendingFolders.length > 0) {
+            const folder = main._pendingFolders.shift();
+            if (!folder) continue;
+            // Skip folders already indexed in the current in-memory cache.
+            const cur = main.folderCacheStore.cache || {};
+            if (Array.isArray(cur[folder]) && cur[folder].length > 0) continue;
+            main._enumeratingFolder = true;
+            const conds = Utils.VIDEO_EXTENSIONS.map(e => `-iname "*${e}"`).join(" -o ");
+            const cmd = `find "${folder}" -type f \( ${conds} \) -print`;
+            folderEnumCommand.exec(cmd, res => {
+                main._enumeratingFolder = false;
+                const out = (res && res.stdout) || "";
+                const files = out.split("\n").map(f => f.trim())
+                    .filter(f => f.length > 0).map(f => "file://" + f);
+                if (files.length > 0) {
+                    const c = main.folderCacheStore.cache || {};
+                    c[folder] = files;
+                    main.folderCacheStore.cache = c;
+                    main.folderCacheStore.save();
+                }
+                main.folderCache = JSON.stringify(main.folderCacheStore.cache || {});
+                main.requestVideosConfigRebuild();
+                main.enumerateNextFolder();
+            }, undefined);
+            break;
+        }
+    }
+
+    // Per-video metadata cache (aspect/resolution/duration), also kept in its
+    // own file. Read-only in the wallpaper; populated externally if ever.
+    CacheStore {
+        id: metadataCacheStore
+        fileName: "video-metadata-cache.json"
+        onCacheLoaded: cache => {
+            main.metadataCache = JSON.stringify(cache);
+        }
+    }
+
+    // Re-read the folder cache file after the folder list changes (the config
+    // dialog appends the freshly enumerated files right before Apply).
+    function reloadFolderCache() {
+        folderCacheStore.load();
+    }
+
+    // Register this monitor in the shared registry and recompute rank/count.
+    // Writes a per-containment fragment, then reads all fragments (ls + cat) and
+    // sorts by (x, y) to derive a stable rank. Runs at startup and periodically so
+    // monitor hotplug / ordering changes are picked up.
+    function refreshMonitorRegistry() {
+        if (!main.tilesMode) return;
+        const id = (Plasmoid && Plasmoid.id !== undefined) ? String(Plasmoid.id) : "0";
+        const dir = main._monitorRegistryDir;
+        const frag = dir + "/" + id + ".json";
+        const entry = JSON.stringify({ id: id, x: main._monitorRankX, y: main._monitorRankY });
+        // local shellQuote helper (same escaping as CacheStore).
+        const q = (t) => "'" + String(t).replace(/'/g, "'\\''") + "'";
+        folderEnumCommand.exec("mkdir -p " + q(dir) + " && printf '%s' " + q(entry) + " > " + q(frag), res => {
+            // Read every fragment and sort by x then y.
+            folderEnumCommand.exec("cat " + q(dir) + "/*.json 2>/dev/null", res2 => {
+                const out = (res2 && res2.stdout) || "";
+                const entries = [];
+                // Fragments are concatenated; split on a sentinel per line is fragile, so
+                // instead list files and cat each is overkill -- parse the JSON stream.
+                for (let i = 0, d = 0; i < out.length; i++) {
+                    if (out[i] === "{") {
+                        let j = out.indexOf("}", i + 1);
+                        if (j === -1) break;
+                        const fragJson = out.slice(i, j + 1);
+                        try {
+                            const e = JSON.parse(fragJson);
+                            if (e && typeof e.x === "number") entries.push(e);
+                        } catch (err) { /* skip malformed fragment */ }
+                        i = j;
+                    }
+                }
+                entries.sort((a, b) => (a.x - b.x) || (a.y - b.y));
+                main.tilesMonitorCount = Math.max(1, entries.length);
+                const myIdx = entries.findIndex(e => String(e.id) === id);
+                main.tilesMonitorRank = myIdx >= 0 ? myIdx : 0;
+            });
+        });
+    }
+
+    Timer {
+        id: monitorRegistryTimer
+        interval: 3000
+        repeat: true
+        running: main.tilesMode
+        onTriggered: main.refreshMonitorRegistry()
+    }
+
     Rectangle {
         id: background
         anchors.fill: parent
@@ -446,7 +620,19 @@ WallpaperItem {
             layoutStyle: main.tilesLayoutStyle
             transformCountBeforeFull: main.tilesTransformsBeforeFull
             choreographyMode: main.tilesChoreographyMode
-            metadataCacheJson: main.configuration.VideoMetadataCache
+            heroSecondaryMode: main.tilesHeroSecondaryMode
+            mazeSize: main.tilesMazeSize
+            metadataCacheJson: main.metadataCache
+            monitorSalt: {
+                // Stable per-monitor salt from the containment id so two screens
+                // never replay the identical tile choreography/videos in lockstep.
+                const id = (Plasmoid && Plasmoid.id !== undefined) ? String(Plasmoid.id) : "";
+                let h = 0;
+                for (let i = 0; i < id.length; i++) { h = ((h * 31) + id.charCodeAt(i)) >>> 0; }
+                return h;
+            }
+            monitorRank: main.tilesMonitorRank
+            monitorCount: main.tilesMonitorCount
             segmentMinMs: main.tilesSegmentMinMs
             segmentMaxMs: main.tilesSegmentMaxMs
             backgroundColor: main.configuration.BackgroundColor
@@ -709,9 +895,12 @@ WallpaperItem {
         printLog("Random mode changed: " + main.randomMode);
     }
 
-    // Rebuild the list when cached folders change (folder added/removed).
+    // Rebuild the list when cached folders change (folder added/removed). The
+    // cache file is written by the config dialog right before Apply, so also
+    // re-read it whenever the folder list itself changes.
     onFoldersChanged: {
         requestVideosConfigRebuild();
+        reloadFolderCache();
     }
     onFolderCacheChanged: {
         requestVideosConfigRebuild();
@@ -742,15 +931,25 @@ WallpaperItem {
     onTilesSegmentMinMsChanged: flushWallpaperConfig()
     onTilesSegmentMaxMsChanged: flushWallpaperConfig()
     onTilesChoreographyModeChanged: flushWallpaperConfig()
+    onTilesHeroSecondaryModeChanged: flushWallpaperConfig()
+    onTilesMazeSizeChanged: flushWallpaperConfig()
 
     Component.onCompleted: {
         startTimer.start();
         Qt.callLater(updateVideosConfig);
+        if (main.tilesMode) {
+            Qt.callLater(main.refreshMonitorRegistry);
+        }
         Qt.callLater(() => {
             player.currentSource = Qt.binding(() => {
                 return main.currentSource;
             });
         });
+    }
+    onTilesModeChanged: {
+        if (main.tilesMode) {
+            main.refreshMonitorRegistry();
+        }
     }
 
     Connections {

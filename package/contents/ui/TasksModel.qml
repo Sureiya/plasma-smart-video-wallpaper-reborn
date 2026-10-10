@@ -117,6 +117,15 @@ Item {
                 continue;
             if (tasksModel.data(currentTask, isMinimized))
                 continue;
+
+            // A fullscreen window covers the entire screen by definition, even
+            // when its reported geometry doesn't perfectly match the screen rect
+            // (different origin / coordinate space on some window systems).
+            if (tasksModel.data(currentTask, isFullScreen)) {
+                root.coveragePercent = 100;
+                return;
+            }
+
             const geom = tasksModel.data(currentTask, geometry);
             if (!geom || !geom.width || !geom.height)
                 continue;
@@ -183,5 +192,17 @@ Item {
         onTriggered: {
             root.updateWindowsInfo();
         }
+    }
+
+    // Safety net: window geometry/coverage can change without a taskmanager
+    // data-change signal (e.g. a window moved over the screen while metadata was
+    // unchanged). Re-evaluate coverage periodically so "pause on coverage" reacts
+    // reliably — including at the moment a new choreography cycle begins.
+    Timer {
+        id: coveragePollTimer
+        interval: 500
+        repeat: true
+        running: true
+        onTriggered: root.updateCoverage()
     }
 }

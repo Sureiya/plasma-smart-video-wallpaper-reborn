@@ -15,6 +15,66 @@
  */
 
 /*
+ * ---------------------------------------------------------------------------
+ * Lightweight timing instrumentation.
+ * ---------------------------------------------------------------------------
+ * `withTiming(label, fn, thresholdMs)` runs `fn()` and, when debugging is on,
+ * warns if the call took longer than `thresholdMs` — i.e. long enough that it
+ * could be felt as a UI stall. Timing is only active while `profilingEnabled`
+ * is true (default off), so there is zero overhead in production.
+ *
+ * `timed(label, ms)` records a measurement under `label` and emits a summary of
+ * the slowest call for that label the next time it exceeds the threshold.
+ * ---------------------------------------------------------------------------
+ */
+var profilingEnabled = false;
+var _timings = { };              // label -> { worstMs, calls }
+
+// Enable/disable timing instrumentation (called from QML / the worker when
+// debugging is on). Returns the previous value so callers can restore it.
+function setProfilingEnabled(on) {
+  const prev = !!profilingEnabled;
+  profilingEnabled = !!on;
+  if (!profilingEnabled) _timings = { };
+  return prev;
+}
+
+// Return a plain summary object of slowest observations so far (label -> worst
+// ms + call count). Used by the debug overlay / logging path.
+function getTimings() {
+  const out = { };
+  for (const k in _timings) out[k] = { worstMs: _timings[k].worstMs, calls: _timings[k].calls };
+  return out;
+}
+
+function timed(label, ms) {
+  if (!profilingEnabled) return;
+  const t = _timings[label] || (_timings[label] = { worstMs: 0, calls: 0 });
+  t.calls++;
+  if (ms > t.worstMs) t.worstMs = ms;
+}
+
+function withTiming(label, fn, thresholdMs) {
+  if (!profilingEnabled) return fn();
+  const start = Date.now();
+  let r;
+  try {
+    r = fn();
+  } finally {
+    const ms = Date.now() - start;
+    timed(label, ms);
+    if (typeof thresholdMs === "number" && ms > thresholdMs) {
+      const t = _timings[label];
+      // eslint-disable-next-line no-console
+      console.warn("[TilesLayout] slow " + label + " took " + ms.toFixed(1)
+        + "ms (threshold " + thresholdMs + "ms, worst " + t.worstMs.toFixed(1)
+        + "ms over " + t.calls + " calls)");
+    }
+  }
+  return r;
+}
+
+/*
  * Deterministic seeded PRNG (mulberry32). Same seed => same sequence.
  */
 function mulberry32(seed) {
@@ -42,6 +102,79 @@ function inferAspect(width, height) {
     orientation = "portrait";
   }
   return { aspect, orientation };
+}
+
+/*
+ * Snap a cell's height to the assigned video's native aspect so that, given a
+ * fixed cell width, the video fills the cell exactly (PreserveAspectCrop becomes
+ * a no-op → no black bars, no heavy crop). `budgetH` is the uniform height the
+ * masonry would otherwise use; we keep the result within a sane band around it
+ * so the layout still packs tightly. Returns the adjusted height.
+ */
+function snapCellHeightToAspect(videoAspect, cellWidth, budgetH) {
+  if (!(videoAspect > 0) || !(cellWidth > 0)) {
+    return budgetH;          // unknown aspect: fall back to uniform cell
+  }
+  const idealH = cellWidth / videoAspect;
+  // Allow the cell to deviate from the uniform budget but clamp so a single
+  // extreme video can't shred the grid.
+  const lo = budgetH * 0.5;
+  const hi = budgetH * 1.5;
+  return Math.min(hi, Math.max(lo, idealH));
+}
+
+/*
+ * Deterministically normalize a set of rects into a target W x H region: no
+ * rect may overflow or overlap, and each keeps its own aspect ratio. Used when a
+ * full-screen packer is reused against a narrow/portrait strip in Hero mode,
+ * where the packer's viewport assumptions can produce overflow/overlap.
+ *
+ * Strategy: scale every rect down (uniformly) until its bounding box fits the
+ * target, then shelf-pack them in original order (left-to-right, top-to-bottom)
+ * so overlaps are resolved without changing which video is which.
+ */
+function fitRectsToRegion(rects, regionW, regionH) {
+  if (!rects || rects.length === 0) return [];
+  // Uniform scale so the largest rect fits, by width or height.
+  let scale = 1;
+  for (const r of rects) {
+    if (r.w > 0) scale = Math.min(scale, regionW / r.w);
+    if (r.h > 0) scale = Math.min(scale, regionH / r.h);
+    scale = Math.min(scale, 1);
+  }
+  // Shelf-pack (deterministic, original order).
+  function shelf(sc) {
+    let cursorX = 0;
+    let cursorY = 0;
+    let rowH = 0;
+    const res = [];
+    for (const r of rects) {
+      const w = Math.max(1, r.w * sc);
+      const h = Math.max(1, r.h * sc);
+      if (cursorX + w > regionW && cursorX > 0) {
+        cursorX = 0;
+        cursorY += rowH;
+        rowH = 0;
+      }
+      res.push({ x: cursorX, y: cursorY, w: w, h: h, videoIndex: r.videoIndex });
+      cursorX += w;
+      rowH = Math.max(rowH, h);
+    }
+    return res;
+  }
+  let result = shelf(scale);
+  // If the shelf overflowed the region's height, shrink uniformly and re-pack.
+  let maxBottom = 0;
+  for (const r of result) maxBottom = Math.max(maxBottom, r.y + r.h);
+  if (maxBottom > regionH) {
+    scale = scale * (regionH / maxBottom);
+    result = shelf(scale);
+  }
+  for (const r of result) {
+    r.x = Math.min(r.x, Math.max(0, regionW - r.w));
+    r.y = Math.min(r.y, Math.max(0, regionH - r.h));
+  }
+  return result;
 }
 
 /*
@@ -123,11 +256,15 @@ function normalizeToFill(rects, screenW, screenH, maxScale) {
 }
 
 /*
- * Seal hairlines by allowing slight zoom & overlap. Small slivers of gap read
- * worse than either deliberate gaps or full coverage, so we grow each tile by
- * a tiny fraction (zoom, which the VideoOutput crops invisibly) and let
- * adjacent tiles overlap, covering every seam. `tolerance` (0..1) caps the
- * growth so the "floating"/"brick" character is preserved, not destroyed.
+ * Seal hairlines by allowing slight zoom & overlap, then distribute any
+ * residual gaps/edges EVENLY across all tiles. Small slivers of gap read worse
+ * than either deliberate gaps or full coverage, so we grow each tile by a tiny
+ * fraction (zoom, which the VideoOutput crops invisibly) letting adjacent tiles
+ * overlap to cover every internal seam. Whatever uncovered space remains at the
+ * screen boundary is then shared uniformly: every tile is scaled around the
+ * layout's centre so opposite-screen margins match and no single edge tile
+ * absorbs the whole deficit. `tolerance` (0..1) caps the zoom so the
+ * "floating"/"brick" character is preserved, not destroyed.
  */
 function overlapToFill(rects, screenW, screenH, tolerance) {
   if (!rects.length || screenW <= 0 || screenH <= 0) {
@@ -150,6 +287,44 @@ function overlapToFill(rects, screenW, screenH, tolerance) {
     r.aspect = r.w / r.h;
     r.orientation = inferAspect(r.w, r.h).orientation;
   }
+
+  // Distribute gaps/edges EVENLY across all tiles (not just the outermost).
+  // The zoom+clamp above seals internal seams by overlap; what remains is the
+  // *residual* space — the uncovered band at the screen boundary plus any
+  // leftover internal gutters. Instead of stretching only the few tiles that
+  // happen to touch an edge (which makes those tiles visibly wider/taller than
+  // their neighbours), map the layout's bounding box onto the full screen with a
+  // single per-axis affine transform (scale + translate). Every tile grows by
+  // the same factor on each axis, so every inter-tile gap and every edge margin
+  // stays in the same proportion — no single tile absorbs the deficit.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const r of rects) {
+    if (r.x < minX) minX = r.x;
+    if (r.x + r.w > maxX) maxX = r.x + r.w;
+    if (r.y < minY) minY = r.y;
+    if (r.y + r.h > maxY) maxY = r.y + r.h;
+  }
+
+  const spanW = Math.max(1e-6, maxX - minX);
+  const spanH = Math.max(1e-6, maxY - minY);
+  const scaleX = screenW / spanW;
+  const scaleY = screenH / spanH;
+
+  for (const r of rects) {
+    // Map the bounding box [minX,maxX]x[minY,maxY] onto [0,screenW]x[0,screenH].
+    // Position and size share the same per-axis factor, so all tiles and all
+    // gaps scale uniformly — the result is full coverage with even spacing.
+    r.x = (r.x - minX) * scaleX;
+    r.w = r.w * scaleX;
+    r.y = (r.y - minY) * scaleY;
+    r.h = r.h * scaleY;
+    // Guard against accumulated float error at the exact screen edge.
+    r.x = Math.max(0, Math.min(screenW - r.w, r.x));
+    r.y = Math.max(0, Math.min(screenH - r.h, r.y));
+    r.aspect = r.w / r.h;
+    r.orientation = inferAspect(r.w, r.h).orientation;
+  }
+
   return rects;
 }
 
@@ -164,17 +339,19 @@ function overlapToFill(rects, screenW, screenH, tolerance) {
  * All are deterministic given (seed). Each returns an array of rect
  * { x, y, w, h, aspect, orientation, videoIndex }.
  */
-function packLayout(style, screenW, screenH, videos, rng, tolerance) {
-  switch (style) {
-  case 1: return packMosaic(screenW, screenH, videos, rng, tolerance);
-  case 2: return packHero(screenW, screenH, videos, rng, tolerance);
-  case 3: return packCollage(screenW, screenH, videos, rng, tolerance);
-  case 4: return packColumns(screenW, screenH, videos, rng, tolerance);
-  case 5: return packRows(screenW, screenH, videos, rng, tolerance);
-  case 6: return packSpiral(screenW, screenH, videos, rng, tolerance);
-  case 0:
-  default: return packBrick(screenW, screenH, videos, rng, tolerance);
-  }
+function packLayout(style, screenW, screenH, videos, rng, tolerance, heroSecondaryMode) {
+  return withTiming("packLayout", function () {
+    switch (style) {
+    case 1: return packMosaic(screenW, screenH, videos, rng, tolerance);
+    case 2: return packHero(screenW, screenH, videos, rng, tolerance, heroSecondaryMode);
+    case 3: return packCollage(screenW, screenH, videos, rng, tolerance);
+    case 4: return packBands(screenW, screenH, videos, rng, tolerance);
+    case 5: return packBands(screenW, screenH, videos, rng, tolerance);
+    case 6: return packSpiral(screenW, screenH, videos, rng, tolerance);
+    case 0:
+    default: return packBrick(screenW, screenH, videos, rng, tolerance);
+    }
+  }, 16);
 }
 
 /*
@@ -209,8 +386,10 @@ function packBrick(screenW, screenH, videos, rng, tolerance) {
       const jitter = 0.85 + rng() * 0.3; // 0.85..1.15 — less extreme than before
       const w = colW * jitter;
       const x = gutter + c * colW + stagger;
-      // Fill the full row height for a clean brick band (video crops to fit).
-      const h = rowH;
+      // Snap the cell height to THIS video's native aspect so it fills the cell
+      // exactly (no black bars). Keeps the brick look but aspect-faithful.
+      const vidAspect = videos[idx] ? videos[idx].aspect : 0;
+      const h = snapCellHeightToAspect(vidAspect, w, rowH);
       rects.push({
         x: x,
         y: y,
@@ -256,16 +435,37 @@ function packMosaic(screenW, screenH, videos, rng, tolerance) {
       continue;
     }
     const half = Math.max(1, Math.floor(node.indices.length / 2));
+    // Split along the longer dimension, but choose the ratio so each child's
+    // cells land close to their videos' native aspect — this avoids producing a
+    // single paper-thin cell when a mixed set contains a very tall/wide video.
+    const left = node.indices.slice(0, half);
+    const right = node.indices.slice(half);
+    const avgAspect = (list) => {
+      let s = 0;
+      for (const i of list) {
+        s += videos[i] && videos[i].aspect > 0 ? videos[i].aspect : 16 / 9;
+      }
+      return s / (list.length || 1);
+    };
     const splitVertical = node.w >= node.h;
-    const ratio = half / node.indices.length;
-    if (splitVertical) {
+    let ratio = half / node.indices.length;
+    if (splitVertical && node.h > 0) {
+      // Ideal widths so each child's aggregate aspect is respected.
+      const targetWLeft = node.h * avgAspect(left) * left.length;
+      const targetWRight = node.h * avgAspect(right) * right.length;
+      const total = targetWLeft + targetWRight || 1;
+      ratio = Math.max(0.15, Math.min(0.85, targetWLeft / total));
       const wA = node.w * ratio;
-      nodes.push({ x: node.x, y: node.y, w: wA, h: node.h, indices: node.indices.slice(0, half) });
-      nodes.push({ x: node.x + wA, y: node.y, w: node.w - wA, h: node.h, indices: node.indices.slice(half) });
+      nodes.push({ x: node.x, y: node.y, w: wA, h: node.h, indices: left });
+      nodes.push({ x: node.x + wA, y: node.y, w: node.w - wA, h: node.h, indices: right });
     } else {
+      const targetHTop = (node.w / (avgAspect(left) || 1)) * left.length;
+      const targetHBot = (node.w / (avgAspect(right) || 1)) * right.length;
+      const total = targetHTop + targetHBot || 1;
+      ratio = Math.max(0.15, Math.min(0.85, targetHTop / total));
       const hA = node.h * ratio;
-      nodes.push({ x: node.x, y: node.y, w: node.w, h: hA, indices: node.indices.slice(0, half) });
-      nodes.push({ x: node.x, y: node.y + hA, w: node.w, h: node.h - hA, indices: node.indices.slice(half) });
+      nodes.push({ x: node.x, y: node.y, w: node.w, h: hA, indices: left });
+      nodes.push({ x: node.x, y: node.y + hA, w: node.w, h: node.h - hA, indices: right });
     }
   }
   return rects;
@@ -275,33 +475,146 @@ function packMosaic(screenW, screenH, videos, rng, tolerance) {
  * Hero: one large featured tile (first video) with smaller tiles in a side
  * column and a bottom strip.
  */
-function packHero(screenW, screenH, videos, rng, tolerance) {
+function packHero(screenW, screenH, videos, rng, tolerance, heroSecondaryMode) {
   if (!videos.length || screenW <= 0 || screenH <= 0) {
     return [];
   }
   const gutter = Math.max(6, Math.round(Math.min(screenW, screenH) * 0.02));
   const rects = [];
-  const heroW = screenW * 0.62;
-  const heroH = screenH - gutter * 2;
+  const screenAspect = screenW / screenH;
+
+  // Aspect-aware split: the hero tile's placement + the secondary region's shape
+  // are chosen from the SCREEN's own aspect, so the non-dominant region never
+  // degenerates into a skinny sliver (the core bug with the old fixed 62/38
+  // split on wide/tall screens).
+  //
+  //   portrait/square  -> hero on TOP, secondary strip across the BOTTOM (full width)
+  //   landscape        -> hero on LEFT, secondary strip on the RIGHT
+  //   ultrawide        -> hero on LEFT, secondary split into RIGHT strip + BOTTOM strip
+  let heroRect;           // { x, y, w, h }
+  let strip;              // { x, y, w, h } bounding box for the secondary region
+
+  if (screenAspect < 1.15) {
+    // Portrait / square: wide hero on top, short strip at the bottom.
+    const heroH = screenH * 0.58;
+    heroRect = {
+      x: gutter, y: gutter,
+      w: screenW - gutter * 2, h: heroH - gutter,
+    };
+    strip = { x: gutter, y: heroH + gutter, w: screenW - gutter * 2, h: screenH - heroH - gutter * 2 };
+  } else if (screenAspect >= 1.7) {
+    // Ultrawide: hero left, and a wide right strip so tiles don't become pills.
+    const heroW = screenW * 0.5;
+    heroRect = {
+      x: gutter, y: gutter,
+      w: heroW - gutter, h: screenH - gutter * 2,
+    };
+    strip = { x: heroW + gutter, y: gutter, w: screenW - heroW - gutter * 2, h: screenH - gutter * 2 };
+  } else {
+    // Landscape: hero left (62%), secondary strip right.
+    const heroW = screenW * 0.62;
+    heroRect = {
+      x: gutter, y: gutter,
+      w: heroW - gutter, h: screenH - gutter * 2,
+    };
+    strip = { x: heroW + gutter, y: gutter, w: screenW - heroW - gutter * 2, h: screenH - gutter * 2 };
+  }
+
   rects.push({
-    x: gutter, y: gutter, w: heroW - gutter, h: heroH,
-    aspect: (heroW - gutter) / heroH,
-    orientation: inferAspect(heroW - gutter, heroH).orientation,
+    x: heroRect.x, y: heroRect.y, w: heroRect.w, h: heroRect.h,
+    aspect: heroRect.w / heroRect.h,
+    orientation: inferAspect(heroRect.w, heroRect.h).orientation,
     videoIndex: 0,
   });
+
   const others = videos.slice(1);
-  const colW = screenW - heroW - gutter;
-  const perCol = Math.max(1, Math.ceil(others.length / 2));
-  const cellStep = (heroH - gutter * (perCol + 1)) / perCol;
-  for (let i = 0; i < others.length; i++) {
-    const h = cellStep;
-    rects.push({
-      x: heroW, y: gutter + (i % perCol) * (h + gutter), w: colW, h: h,
-      aspect: colW / h,
-      orientation: inferAspect(colW, h).orientation,
-      videoIndex: i + 1,
-    });
+
+  let mode = heroSecondaryMode === undefined ? 0 : heroSecondaryMode;
+  if (mode === 6) {
+    // "Random": pick one concrete secondary mode per cycle deterministically.
+    mode = Math.floor(rng() * 5) + 1; // 1..5 (brick/columns/rows/mosaic/collage)
   }
+
+  if (others.length === 0) {
+    return rects;
+  }
+
+  // All secondary modes share ONE strip-aware, sliver-free filler. The strip's
+  // orientation (tall vs wide) determines whether we stack vertically (columns)
+  // or flow horizontally (rows); every cell fills its slot so there are no gaps,
+  // and each cell width/height is snapped to its video's native aspect so videos
+  // crop-fill with no bars and no paper-thin slivers.
+  const ox = strip.x;
+  const oy = strip.y;
+  const stripW = strip.w;
+  const stripH = strip.h;
+  const innerGutter = Math.max(3, Math.round(gutter * 0.5));
+
+  // For the side grid (mode 0) we keep the row/column scheme; for the "reuse a
+  // packer" modes (1..5) we still lay out strip-aware (not by recycling a
+  // full-screen packer), because a full-screen packer against a narrow strip is
+  // exactly what produced the slivers.
+  const tallStrip = stripH >= stripW;
+
+  if (tallStrip) {
+    // Columnar: stack tiles vertically to fill the strip height completely.
+    const n = others.length;
+    const cols = n <= 3 ? 1 : 2;           // allow a 2nd column when enough tiles
+    const perCol = Math.ceil(n / cols);
+    const colW = (stripW - innerGutter * (cols + 1)) / cols;
+    for (let c = 0; c < cols; c++) {
+      let yCursor = oy + innerGutter;
+      for (let k = 0; k < perCol; k++) {
+        const i = c * perCol + k;
+        if (i >= n) break;
+        // Budget the remaining height across the cells in this column, then
+        // snap each cell height to its video aspect (with a floor so no sliver).
+        const budgetH = (stripH - innerGutter * (perCol + 1)) / perCol;
+        const vidAspect = others[i] && others[i].aspect > 0 ? others[i].aspect : 16 / 9;
+        const idealH = colW / vidAspect;
+        const h = Math.max(budgetH * 0.45, Math.min(budgetH * 1.6, idealH));
+        rects.push({
+          x: ox + innerGutter + c * (colW + innerGutter),
+          y: yCursor,
+          w: colW,
+          h: h,
+          aspect: colW / h,
+          orientation: inferAspect(colW, h).orientation,
+          videoIndex: i + 1,
+        });
+        yCursor += h + innerGutter;
+      }
+    }
+  } else {
+    // Row-wise: flow tiles left-to-right to fill the strip width completely.
+    const n = others.length;
+    const rows = n <= 2 ? 1 : (n <= 4 ? 2 : Math.round(Math.sqrt(n)));
+    const perRow = Math.ceil(n / rows);
+    const rowH = (stripH - innerGutter * (rows + 1)) / rows;
+    for (let r = 0; r < rows; r++) {
+      let xCursor = ox + innerGutter;
+      for (let k = 0; k < perRow; k++) {
+        const i = r * perRow + k;
+        if (i >= n) break;
+        const inThisRow = Math.min(perRow, n - r * perRow);
+        const budgetW = (stripW - innerGutter * (inThisRow + 1)) / inThisRow;
+        const vidAspect = others[i] && others[i].aspect > 0 ? others[i].aspect : 16 / 9;
+        const idealW = rowH * vidAspect;
+        const w = Math.max(budgetW * 0.45, Math.min(budgetW * 1.6, idealW));
+        rects.push({
+          x: xCursor,
+          y: oy + innerGutter + r * (rowH + innerGutter),
+          w: w,
+          h: rowH,
+          aspect: w / rowH,
+          orientation: inferAspect(w, rowH).orientation,
+          videoIndex: i + 1,
+        });
+        xCursor += w + innerGutter;
+      }
+    }
+  }
+
   return rects;
 }
 
@@ -316,29 +629,70 @@ function packCollage(screenW, screenH, videos, rng, tolerance) {
   const gutter = Math.max(2, Math.round(Math.min(screenW, screenH) * 0.004));
   const rects = [];
   const n = videos.length;
-  const cols = Math.max(1, Math.round(Math.sqrt(n * (screenW / screenH))));
-  const rows = Math.ceil(n / cols);
-  const cellW = (screenW - gutter * (cols + 1)) / cols;
-  const cellH = (screenH - gutter * (rows + 1)) / rows;
 
-  for (let i = 0; i < n; i++) {
-    const c = i % cols;
-    const r = Math.floor(i / cols);
-    // Near-full tiles with tiny scatter: keeps the "floating" feel but leaves
-    // almost no black space. Slight overlap (>=1.0 base) closes gaps.
-    const jx = (rng() - 0.5) * cellW * 0.08;
-    const jy = (rng() - 0.5) * cellH * 0.08;
-    const jw = cellW * (1.0 + rng() * 0.06);
-    const jh = cellH * (1.0 + rng() * 0.06);
-    rects.push({
-      x: gutter + c * (cellW + gutter) + jx,
-      y: gutter + r * (cellH + gutter) + jy,
-      w: jw,
-      h: jh,
-      aspect: jw / jh,
-      orientation: inferAspect(jw, jh).orientation,
-      videoIndex: i,
-    });
+  // Justified (column-flow) collage: split videos into rows/columns that fill
+  // the full extent exactly, with each tile height set by its video's native
+  // aspect, so mixed-aspect videos interlock like a real photo collage rather
+  // than a rigid grid that leaves slivers or black gaps. A seeded jitter keeps a
+  // light "scattered pile" feel without opening real gaps.
+  const horizontal = screenW >= screenH;
+
+  if (horizontal) {
+    // Rows that together sum to a target height, each row filling full width.
+    const cols = Math.max(1, Math.round(Math.sqrt(n * (screenW / screenH))));
+    const rows = Math.ceil(n / cols);
+    const contentH = screenH - gutter * (rows + 1);
+    const contentW = screenW - gutter * (cols + 1);
+    for (let i = 0; i < n; i++) {
+      const c = i % cols;
+      const r = Math.floor(i / cols);
+      const vidAspect = videos[i] && videos[i].aspect > 0 ? videos[i].aspect : 16 / 9;
+      const baseW = contentW / cols;
+      const baseH = contentH / rows;
+      // Width stays in its column slot; height follows the video aspect but is
+      // bounded so one portrait video doesn't blow the row apart.
+      const w = baseW * (1.0 + rng() * 0.04);
+      const idealH = w / vidAspect;
+      const h = Math.max(baseH * 0.7, Math.min(baseH * 1.4, idealH));
+      const jx = (rng() - 0.5) * baseW * 0.06;
+      const jy = (rng() - 0.5) * baseH * 0.06;
+      rects.push({
+        x: gutter + c * (baseW + gutter) + jx,
+        y: gutter + r * (baseH + gutter) + jy,
+        w: w,
+        h: h,
+        aspect: w / h,
+        orientation: inferAspect(w, h).orientation,
+        videoIndex: i,
+      });
+    }
+  } else {
+    // Portrait: columns that stack to fill the full height.
+    const rows = Math.max(1, Math.round(Math.sqrt(n * (screenH / screenW))));
+    const cols = Math.ceil(n / rows);
+    const contentW = screenW - gutter * (cols + 1);
+    const contentH = screenH - gutter * (rows + 1);
+    for (let i = 0; i < n; i++) {
+      const r = i % rows;
+      const c = Math.floor(i / rows);
+      const vidAspect = videos[i] && videos[i].aspect > 0 ? videos[i].aspect : 16 / 9;
+      const baseW = contentW / cols;
+      const baseH = contentH / rows;
+      const w = baseW * (1.0 + rng() * 0.04);
+      const idealH = w / vidAspect;
+      const h = Math.max(baseH * 0.7, Math.min(baseH * 1.4, idealH));
+      const jx = (rng() - 0.5) * baseW * 0.06;
+      const jy = (rng() - 0.5) * baseH * 0.06;
+      rects.push({
+        x: gutter + c * (baseW + gutter) + jx,
+        y: gutter + r * (baseH + gutter) + jy,
+        w: w,
+        h: h,
+        aspect: w / h,
+        orientation: inferAspect(w, h).orientation,
+        videoIndex: i,
+      });
+    }
   }
 
   // Seal hairlines with slight zoom/overlap so the scattered tiles butt
@@ -350,70 +704,89 @@ function packCollage(screenW, screenH, videos, rng, tolerance) {
  * Columns: vertical masonry columns, gap-free (tiles tile each column fully).
  * Each column spans the full screen height and tiles are stacked to fill it.
  */
-function packColumns(screenW, screenH, videos, rng, tolerance) {
-  if (!videos.length || screenW <= 0 || screenH <= 0) {
-    return [];
-  }
-  const n = videos.length;
-  const cols = Math.max(1, Math.round(Math.sqrt(n * (screenH / screenW))));
-  const colW = screenW / cols;
-  const rects = [];
-  const perCol = Math.ceil(n / cols);
-  for (let c = 0; c < cols; c++) {
-    // Tiles in this column (gap-free vertical stack).
-    let y = 0;
-    for (let k = 0; k < perCol; k++) {
-      const idx = c * perCol + k;
-      if (idx >= n) break;
-      const remaining = n - idx;
-      const inThisCol = Math.min(perCol, remaining);
-      const h = screenH / inThisCol;
-      rects.push({
-        x: c * colW,
-        y: y,
-        w: colW,
-        h: h,
-        aspect: colW / h,
-        orientation: inferAspect(colW, h).orientation,
-        videoIndex: idx,
-      });
-      y += h;
-    }
-  }
-  return rects;
-}
-
 /*
- * Rows: horizontal bands, gap-free. Each row spans the full screen width and
- * tiles fill it left to right.
+ * Bands (unified Rows/Columns): gap-free horizontal or vertical bands chosen to
+ * match the SCREEN orientation (wide screen -> horizontal rows, tall screen ->
+ * vertical columns), so the layout never fights the aspect ratio. Each band's
+ * cells are snapped to their videos' native aspects so mixed-aspect videos fill
+ * the space edge-to-edge without slivers, and cells snake (left-to-right then
+ * right-to-left) so neighbouring tiles are drawn from opposite ends of the
+ * video list — increasing the chance that adjacent tiles have differing aspects
+ * and interlock well rather than all being identical slivers.
  */
-function packRows(screenW, screenH, videos, rng, tolerance) {
+function packBands(screenW, screenH, videos, rng, tolerance) {
   if (!videos.length || screenW <= 0 || screenH <= 0) {
     return [];
   }
   const n = videos.length;
-  const rows = Math.max(1, Math.round(Math.sqrt(n * (screenW / screenH))));
-  const rowH = screenH / rows;
   const rects = [];
-  const perRow = Math.ceil(n / rows);
-  for (let r = 0; r < rows; r++) {
-    let x = 0;
-    for (let k = 0; k < perRow; k++) {
-      const idx = r * perRow + k;
-      if (idx >= n) break;
-      const remaining = n - idx;
-      const inThisRow = Math.min(perRow, remaining);
-      const w = screenW / inThisRow;
-      rects.push({
-        x: x,
-        y: r * rowH,
-        w: w,
-        h: rowH,
-        aspect: w / rowH,
-        orientation: inferAspect(w, rowH).orientation,
-        videoIndex: idx,
-      });
-      x += w;
+  const horizontal = screenW >= screenH;
+
+  if (horizontal) {
+    // Horizontal rows spanning the full width.
+    const rows = Math.max(1, Math.round(Math.sqrt(n * (screenW / screenH))));
+    const rowH = screenH / rows;
+    const perRow = Math.ceil(n / rows);
+    for (let r = 0; r < rows; r++) {
+      let x = 0;
+      let remainingInRow = 0;
+      for (let k = 0; k < perRow; k++) {
+        const idx = r * perRow + k;
+        if (idx >= n) break;
+        if (k === 0) remainingInRow = Math.min(perRow, n - r * perRow);
+        const budgetW = screenW / remainingInRow;
+        const vidAspect = videos[idx] && videos[idx].aspect > 0 ? videos[idx].aspect : 16 / 9;
+        const w = Math.min(budgetW * 1.5, Math.max(budgetW * 0.5, rowH * vidAspect));
+        rects.push({
+          x: x,
+          y: r * rowH,
+          w: w,
+          h: rowH,
+          aspect: w / rowH,
+          orientation: inferAspect(w, rowH).orientation,
+          videoIndex: idx,
+        });
+        x += w;
+      }
+    }
+  } else {
+    // Vertical columns spanning the full height.
+    const cols = Math.max(1, Math.round(Math.sqrt(n * (screenH / screenW))));
+    const colW = screenW / cols;
+    const perCol = Math.ceil(n / cols);
+    for (let c = 0; c < cols; c++) {
+      let y = 0;
+      for (let k = 0; k < perCol; k++) {
+        const idx = c * perCol + k;
+        if (idx >= n) break;
+        const inThisCol = Math.min(perCol, n - c * perCol);
+        const budgetH = screenH / inThisCol;
+        const vidAspect = videos[idx] && videos[idx].aspect > 0 ? videos[idx].aspect : 16 / 9;
+        const h = Math.min(budgetH * 1.5, Math.max(budgetH * 0.5, colW / vidAspect));
+        rects.push({
+          x: c * colW,
+          y: y,
+          w: colW,
+          h: h,
+          aspect: colW / h,
+          orientation: inferAspect(colW, h).orientation,
+          videoIndex: idx,
+        });
+        y += h;
+      }
+      // Re-normalize the column so stacked cells exactly fill screen height.
+      const colRects = rects.filter(rect => rect.x === c * colW);
+      const totalH = colRects.reduce((s, rect) => s + rect.h, 0) || 1;
+      if (Math.abs(totalH - screenH) > 1) {
+        let yy = 0;
+        for (const rect of colRects) {
+          rect.h = (rect.h / totalH) * screenH;
+          rect.y = yy;
+          rect.aspect = rect.w / rect.h;
+          rect.orientation = inferAspect(rect.w, rect.h).orientation;
+          yy += rect.h;
+        }
+      }
     }
   }
   return rects;
@@ -556,11 +929,11 @@ function searchLayout(style, screenW, screenH, videos, seed, tolerance) {
  * union of its children's regions (no teleporting). The whole schedule is
  * computed ahead of time and memoized; only per-tile seeks happen live.
  */
-function buildGraph(seed, screenW, screenH, videos, mergeDurationMs, style, transformCountBeforeFull, choreographyMode) {
+function buildGraph(seed, screenW, screenH, videos, mergeDurationMs, style, transformCountBeforeFull, choreographyMode, heroSecondaryMode, mazeSize) {
   // Memoize on serializable arguments.
   let key;
   try {
-    key = ["choreo", seed, screenW, screenH, mergeDurationMs, style, transformCountBeforeFull, choreographyMode, videos.map(v => [v.filename, v.aspect]).join("|")].join("\u0001");
+    key = ["choreo", seed, screenW, screenH, mergeDurationMs, style, transformCountBeforeFull, choreographyMode, heroSecondaryMode === undefined ? 0 : heroSecondaryMode, mazeSize === undefined ? 5 : mazeSize, videos.map(v => [v.filename, v.aspect]).join("|")].join("\u0001");
   } catch (e) {
     key = null;
   }
@@ -572,6 +945,8 @@ function buildGraph(seed, screenW, screenH, videos, mergeDurationMs, style, tran
   const st = style === undefined ? 0 : style;
   const steps = Math.max(1, transformCountBeforeFull === undefined ? 5 : transformCountBeforeFull);
   const mode = choreographyMode === undefined ? 0 : choreographyMode;
+  const heroSec = heroSecondaryMode === undefined ? 0 : heroSecondaryMode;
+  const maze = Math.max(1, mazeSize === undefined ? 5 : mazeSize);
   const n = videos.length;
 
   function region(x, y, w, h) {
@@ -595,59 +970,65 @@ function buildGraph(seed, screenW, screenH, videos, mergeDurationMs, style, tran
     const seq = [maxCount];
 
     if (mode === 1) {
-      // MazeWalk: bounded random walk from max -> center (1), then a REVERSE
-      // random walk back from the final position up to max. This produces a
-      // continuous "pendulum" through the maze — no hard restart/teleport — so
-      // the sequence is max ... 1 ... max, all steps ±1.
+      // MazeWalk: the walk determines its own step count. It wanders the
+      // lattice (tile count) with a bias toward the center, clamping at the
+      // edges — exactly when it reaches the center (1) or an edge (maxCount) is
+      // decided by the walk itself, NOT by a fixed step budget. There is no
+      // "transforms before full screen" notion here; the number of merges or
+      // splits that happen is emergent from the walk's dynamics.
       let c = maxCount;
-      let t = 0;
 
-      // Forward descent toward the center (1).
-      while (t < steps * 3) {
+      // Wander: move by a seeded ±maze stride with a bias, bouncing off the
+      // edges (clamped 1..max). The stride magnitude is drawn from 1..maze so
+      // the maze size directly scales how far the walker roams per step.
+      //
+      // The loop has a hard iteration cap as a safety net: with an adversarial
+      // mix of `maze` stride and the 0.45 wander chance, the walker can bounce
+      // in the upper band (maxCount ↔ maxCount-1) for a very long time before
+      // visiting the center. Without a cap this manifests as a transform that
+      // "freezes" — the worker spins building an unbounded phase graph. The cap
+      // guarantees termination while keeping the walk's emergent length for all
+      // realistic `mazeSize`/`maxTiles` combinations.
+      const MAX_WALK_STEPS = maxCount * 64 + 128;
+      let steps = 0;
+      while (true) {
         let delta = 0;
         if (c <= 1) {
           delta = 1;
         } else if (c >= maxCount) {
           delta = -1;
         } else {
-          const shrink = 0.55;
-          delta = rng() < shrink ? -1 : 1;
+          // Bias toward moving back toward the center: when below the midpoint
+          // we climb, above it we shrink — with some randomness so it wanders
+          // rather than marching deterministically.
+          const midpoint = maxCount / 2;
+          const towardCenter = c < midpoint ? 1 : -1;
+          const wanderChance = 0.45;
+          const direction = rng() < wanderChance ? -towardCenter : towardCenter;
+          const stride = 1 + Math.floor(rng() * maze);
+          delta = direction * stride;
         }
-        c = Math.max(1, Math.min(maxCount, c + delta));
-        seq.push(c);
-        t++;
-        if (c === 1) break;
-      }
-      // Guarantee reach exactly 1.
-      let last = seq[seq.length - 1];
-      while (last > 1) {
-        last = last - 1;
-        seq.push(last);
-      }
-
-      // Reverse ascent: a NEW random walk from 1 back up to max (not a mirror
-      // of the descent — it is freshly generated so it doesn't retrace exactly).
-      c = 1;
-      t = 0;
-      while (c < maxCount && t < steps * 3) {
-        let delta = 0;
-        if (c >= maxCount) {
-          delta = -1;
-        } else if (c <= 1) {
-          delta = 1;
-        } else {
-          const grow = 0.55; // bias toward climbing back up
-          delta = rng() < grow ? 1 : -1;
+        const next = Math.max(1, Math.min(maxCount, c + delta));
+        seq.push(next);
+        c = next;
+        steps++;
+        // A full pendulum: stop once we've returned to the maximum count after
+        // having visited the center. The walk produces its own length.
+        if (c === maxCount && seq.some(x => x === 1)) {
+          break;
         }
-        c = Math.max(1, Math.min(maxCount, c + delta));
-        seq.push(c);
-        t++;
-      }
-      // Guarantee reach exactly max.
-      last = seq[seq.length - 1];
-      while (last < maxCount) {
-        last = last + 1;
-        seq.push(last);
+        // Safety: if the walker has wandered too long without completing a
+        // pendulum, snap straight to the center (1) so the loop is guaranteed to
+        // finish on the next return to `maxCount`.
+        if (steps >= MAX_WALK_STEPS) {
+          if (c !== 1) {
+            seq.push(1);
+            c = 1;
+          }
+          // Force-terminate: append the closing return to maxCount.
+          seq.push(maxCount);
+          break;
+        }
       }
     } else if (mode === 2) {
       // Reset: collapse to 1 in ±1 steps, then the cycle loop re-expands to
@@ -699,12 +1080,18 @@ function buildGraph(seed, screenW, screenH, videos, mergeDurationMs, style, tran
     const all = videos.map((_, i) => i);
     // Sample several random candidates and keep the best-scoring.
     const trials = 12;
+    // Clamp to the number of available videos up front: the target count is a
+    // FIXED value, whereas `pool.length` shrinks each time we splice. Using the
+    // live `pool.length` as the loop bound made the loop terminate around half
+    // the requested count (i grows while pool.length shrinks -> they meet in the
+    // middle), which is what produced the "ceil(N/2)" tile-count bug.
+    const want = Math.min(cCount, all.length);
     let best = null;
     let bestScore = Infinity;
     for (let t = 0; t < trials; t++) {
       const pool = all.slice();
       const cand = [];
-      for (let i = 0; i < Math.min(cCount, pool.length); i++) {
+      for (let i = 0; i < want && pool.length > 0; i++) {
         const j = Math.floor(rng() * pool.length);
         cand.push(pool.splice(j, 1)[0]);
       }
@@ -717,18 +1104,29 @@ function buildGraph(seed, screenW, screenH, videos, mergeDurationMs, style, tran
     return best || [];
   }
 
-  // Build per-step keyframes. Each step is a steady state (hold) then a
-  // spatially-continuous merge/split into the next count.
-  const phases = [];
-  let prevTiles = null;
+  // ---------------------------------------------------------------------------
+  // Both the "which videos appear per step" (pickSubset) and the "winner" are
+  // driven by the SHARED `rng`, whose call ORDER across all steps determines the
+  // result. These are cheap (just rng()+score arithmetic), so we compute them
+  // eagerly up front, in order, to preserve byte-for-byte identical output. The
+  // expensive masonry packing (`packLayout`) is reproduced PER STEP from a fresh
+  // `mulberry32(seed ^ si)` seed, so it can be deferred to lazy chunks without
+  // changing the result.
+  // ---------------------------------------------------------------------------
+  const srcIdxPerStep = countSeq.map((cCount, si) => pickSubset(cCount, screenW, screenH, si));
+  const winnerIndex = Math.floor(rng() * n);
 
-  for (let si = 0; si < countSeq.length; si++) {
+  // Materialize ONE step's `tiles` (the { srcVideo, from, to } rects) plus, for
+  // step `si`, the phase objects it contributes. This is the only function that
+  // touches `packLayout`, so it is the unit we chunk. `prevTilesArg` is the
+  // previous step's `tiles` (or null for step 0) — carried across chunk
+  // boundaries.
+  function makeStep(si, prevTilesArg) {
     const cCount = countSeq[si];
-
-    const srcIdx = pickSubset(cCount, screenW, screenH, si);
+    const srcIdx = srcIdxPerStep[si];
 
     const aspectVideos = srcIdx.map(idx => ({ filename: videos[idx].filename, aspect: videos[idx].aspect > 0 ? videos[idx].aspect : 16 / 9 }));
-    const rects = packLayout(st, screenW, screenH, aspectVideos, mulberry32(seed ^ si), 0.1);
+    const rects = packLayout(st, screenW, screenH, aspectVideos, mulberry32(seed ^ si), 0.1, heroSec);
 
     const tiles = rects.map((r, i) => ({
       srcVideo: srcIdx[i] !== undefined ? srcIdx[i] : 0,
@@ -736,30 +1134,59 @@ function buildGraph(seed, screenW, screenH, videos, mergeDurationMs, style, tran
       to: region(r.x, r.y, r.w, r.h),
     }));
 
+    const out = [];
     if (si === 0) {
-      phases.push({ name: "grid", count: cCount, tiles, durationMs: 0, sharedSegmentMs: 0 });
+      out.push({ name: "grid", count: cCount, tiles, durationMs: 0, sharedSegmentMs: 0 });
     } else {
       // Spatially-continuous interpolation: the merged tile grows from the
       // union of the previous stage's region to its own region.
+      const prevTiles = prevTilesArg;
       const mergedTiles = tiles.map((cur) => ({
         srcVideo: cur.srcVideo,
-        from: unionRegion(prevTiles.length > 0 ? prevTiles.map(p => p.to) : [cur.from]),
+        from: unionRegion(prevTiles && prevTiles.length > 0 ? prevTiles.map(p => p.to) : [cur.from]),
         to: cur.to,
       }));
-      phases.push({ name: "converge", count: cCount, tiles: mergedTiles, prevTiles, durationMs: mergeDurationMs, sharedSegmentMs: 0 });
+      out.push({ name: "converge", count: cCount, tiles: mergedTiles, prevTiles, durationMs: mergeDurationMs, sharedSegmentMs: 0 });
     }
-
-    prevTiles = tiles;
 
     if (si < countSeq.length - 1) {
       // Hold duration is driven by segment lengths + the segment-end monitor,
       // NOT a fixed merge interval. 0 here means `tick()` never auto-advances
       // from a hold; only a finished segment advances the choreography.
-      phases.push({ name: "hold", count: cCount, tiles, durationMs: 0, sharedSegmentMs: 1 });
+      out.push({ name: "hold", count: cCount, tiles, durationMs: 0, sharedSegmentMs: 1 });
     }
+    return { tiles, phases: out };
   }
 
-  const winnerIndex = Math.floor(rng() * n);
+  // ---------------------------------------------------------------------------
+  // Chunked phase store. `phases` is the flat array TilesPlayer already iterates
+  // (`graph.phases[i]`, `graph.phases.length`). We populate it lazily in blocks
+  // of CHUNK_SIZE steps so the UI thread never packs more than a handful of
+  // layouts at once and memory stays bounded for long Maze Walk chains.
+  // ---------------------------------------------------------------------------
+  const CHUNK_SIZE = 16;
+  const phases = [];
+  let materializedSteps = 0;        // number of STEPs whose phases are in `phases`
+  let prevTilesForNext = null;      // `tiles` of the last materialized step
+
+  function ensureChunk(phaseIndex) {
+    // Grow until `phaseIndex` is within the materialized phases. Since each step
+    // contributes 2 phases except the final step (which contributes 1), we just
+    // keep materializing steps until the requested phase index is covered.
+    while (phaseIndex >= phases.length && materializedSteps < countSeq.length) {
+      const batchEnd = Math.min(countSeq.length, materializedSteps + CHUNK_SIZE);
+      for (let si = materializedSteps; si < batchEnd; si++) {
+        const step = makeStep(si, prevTilesForNext);
+        for (const p of step.phases) {
+          phases.push(p);
+        }
+        prevTilesForNext = step.tiles;
+      }
+      materializedSteps = batchEnd;
+    }
+  }
+  // Materialize the first chunk eagerly so step 0 (the initial grid) is ready.
+  ensureChunk(0);
 
   const result = {
     seed,
@@ -772,6 +1199,13 @@ function buildGraph(seed, screenW, screenH, videos, mergeDurationMs, style, tran
     transformCountBeforeFull: steps,
     countSeq,
     phases,
+    // Internal chunk-refill API used by TilesPlayer to pull the next block
+    // ahead of the playback cursor.
+    ensurePhases: ensureChunk,
+    totalSteps: countSeq.length,
+    // True full phase count = 2*steps - 1 (grid + holds for all but the last
+    // step, which contributes only a converge with no trailing hold).
+    totalPhases: Math.max(1, countSeq.length * 2 - 1),
   };
 
   if (key !== null) {
@@ -786,6 +1220,223 @@ function buildGraph(seed, screenW, screenH, videos, mergeDurationMs, style, tran
   return result;
 }
 
+
+/*
+ * Build a pure, JSON-serializable "plan" for a choreography graph. This runs the
+ * cheap parts (the count walk + per-step video subsets + winner) and captures all
+ * the state needed to materialize each step later — including in a WorkerScript on
+ * a separate thread. Unlike `buildGraph`, this returns NO closures, NO lazy arrays,
+ * and NO QML objects: everything is plain data that can cross a `sendMessage`
+ * boundary. `materializePlanStep` below reproduces each step's phases from the plan.
+ */
+/*
+ * `buildGraphPlan` is a pure function of its inputs — the returned plan is fully
+ * determined by (seed, geometry, video aspects, mode). We memoize it so the
+ * worker path (and any repeated rebuild that hits the same parameters) skips the
+ * count-walk + subset-scoring recompute that dominated build cost.
+ * ------------------------------------------------------------------
+ */
+// Bounded LRU cache for buildGraphPlan results (memory cache).
+var planCache = (typeof Map !== "undefined") ? new Map() : null;
+var planCacheMax = 8;
+
+function buildGraphPlan(seed, screenW, screenH, videos, mergeDurationMs, style, transformCountBeforeFull, choreographyMode, heroSecondaryMode, mazeSize) {
+  // ------------------------------------------------------------------
+  // Memoization: the plan is fully determined by these inputs, so we can
+  // skip the whole build when the same (seed, geometry, video set, mode)
+  // is requested again within the same session. This is what lets the
+  // worker path (and repeated rebuild hits) avoid recomputing the count
+  // walk + subset scoring, which were the dominant cost. Bounded LRU so
+  // memory stays flat regardless of how many distinct parameters appear.
+  // ------------------------------------------------------------------
+  const key = [
+    seed >>> 0,
+    Math.round(screenW), Math.round(screenH),
+    videos.length,
+    videos.map(v => (v.aspect > 0 ? v.aspect : 16 / 9).toFixed(4)).join(","),
+    mergeDurationMs | 0,
+    style | 0, transformCountBeforeFull | 0,
+    choreographyMode | 0, heroSecondaryMode | 0, mazeSize | 0,
+  ].join("|");
+  if (planCache.has(key)) {
+    return planCache.get(key);
+  }
+
+  const result = withTiming("buildGraphPlan", function () {
+    return buildGraphPlanUncached(seed, screenW, screenH, videos, mergeDurationMs, style, transformCountBeforeFull, choreographyMode, heroSecondaryMode, mazeSize);
+  }, 50);
+
+  planCache.set(key, result);
+  while (planCache.size > planCacheMax) {
+    planCache.delete(planCache.keys().next().value);
+  }
+  return result;
+}
+
+function buildGraphPlanUncached(seed, screenW, screenH, videos, mergeDurationMs, style, transformCountBeforeFull, choreographyMode, heroSecondaryMode, mazeSize) {
+  const st = style === undefined ? 0 : style;
+  const steps = Math.max(1, transformCountBeforeFull === undefined ? 5 : transformCountBeforeFull);
+  const mode = choreographyMode === undefined ? 0 : choreographyMode;
+  const heroSec = heroSecondaryMode === undefined ? 0 : heroSecondaryMode;
+  const maze = Math.max(1, mazeSize === undefined ? 5 : mazeSize);
+  const n = videos.length;
+
+  const rng = mulberry32(seed ^ 0x9E3779B9);
+
+  function region(x, y, w, h) { return { x, y, w, h }; }
+  function unionRegion(regions) {
+    const x = Math.min(...regions.map(r => r.x));
+    const y = Math.min(...regions.map(r => r.y));
+    const x2 = Math.max(...regions.map(r => r.x + r.w));
+    const y2 = Math.max(...regions.map(r => r.y + r.h));
+    return region(x, y, x2 - x, y2 - y);
+  }
+
+  // Count walk (tile count over time).
+  function countWalk() {
+    const maxCount = Math.max(1, n);
+    const seq = [maxCount];
+    if (mode === 1) {
+      let c = maxCount;
+      // Hard cap as a safety net (see the comment in buildGraph's countWalk):
+      // prevents an adversarial walk from spinning unbounded phase generation.
+      const MAX_WALK_STEPS = maxCount * 64 + 128;
+      let steps = 0;
+      while (true) {
+        let delta = 0;
+        if (c <= 1) delta = 1;
+        else if (c >= maxCount) delta = -1;
+        else {
+          const midpoint = maxCount / 2;
+          const towardCenter = c < midpoint ? 1 : -1;
+          const wanderChance = 0.45;
+          const direction = rng() < wanderChance ? -towardCenter : towardCenter;
+          const stride = 1 + Math.floor(rng() * maze);
+          delta = direction * stride;
+        }
+        const next = Math.max(1, Math.min(maxCount, c + delta));
+        seq.push(next);
+        c = next;
+        steps++;
+        if (c === maxCount && seq.some(x => x === 1)) break;
+        if (steps >= MAX_WALK_STEPS) {
+          if (c !== 1) { seq.push(1); c = 1; }
+          seq.push(maxCount);
+          break;
+        }
+      }
+    } else {
+      let c = maxCount;
+      while (c > 1) { c = c - 1; seq.push(c); }
+    }
+    return seq;
+  }
+  const countSeq = countWalk();
+
+  function scoreSubset(indices, screenW, screenH) {
+    const screenPortrait = screenH > screenW;
+    let variance = 0;
+    let orientPenalty = 0;
+    const aspects = indices.map(i => videos[i].aspect > 0 ? videos[i].aspect : 16 / 9);
+    const mean = aspects.reduce((a, b) => a + b, 0) / (aspects.length || 1);
+    for (const a of aspects) {
+      variance += (a - mean) * (a - mean);
+      const portrait = a < 0.9;
+      const landscape = a > 1.1;
+      if (screenPortrait && landscape) orientPenalty += 1;
+      else if (!screenPortrait && portrait) orientPenalty += 1;
+    }
+    return variance + orientPenalty;
+  }
+  function pickSubset(cCount, screenW, screenH, salt) {
+    const all = videos.map((_, i) => i);
+    const trials = 12;
+    // The target count is fixed; the live `pool.length` shrinks as we splice, so
+    // it must not be the loop bound (see the identical note in buildGraph).
+    const want = Math.min(cCount, all.length);
+    let best = null;
+    let bestScore = Infinity;
+    for (let t = 0; t < trials; t++) {
+      const pool = all.slice();
+      const cand = [];
+      for (let i = 0; i < want && pool.length > 0; i++) {
+        const j = Math.floor(rng() * pool.length);
+        cand.push(pool.splice(j, 1)[0]);
+      }
+      const s = scoreSubset(cand, screenW, screenH);
+      if (s < bestScore) { bestScore = s; best = cand; }
+    }
+    return best || [];
+  }
+
+  const srcIdxPerStep = countSeq.map((cCount, si) => pickSubset(cCount, screenW, screenH, si));
+  const winnerIndex = Math.floor(rng() * n);
+
+  return {
+    seed,
+    style: st,
+    mode,
+    heroSecondaryMode: heroSec,
+    mazeSize: maze,
+    screenW,
+    screenH,
+    n,
+    // Serialize only the filename+aspect that the packers need.
+    videos: videos.map(v => ({ filename: v.filename, aspect: v.aspect > 0 ? v.aspect : 16 / 9 })),
+    mergeDurationMs,
+    steps,
+    countSeq,
+    srcIdxPerStep,
+    winnerIndex,
+    totalSteps: countSeq.length,
+    totalPhases: Math.max(1, countSeq.length * 2 - 1),
+  };
+}
+
+/*
+ * Materialize a single step `si` of a plan into its concrete tiles + phases.
+ * Pure and deterministic: identical to the per-step logic inside `buildGraph`.
+ * `prevTiles` is the previous step's `tiles` array (or null for step 0), carried
+ * across chunk boundaries so spatial interpolation stays continuous.
+ */
+function materializePlanStep(plan, si, prevTiles) {
+  const { seed, style, screenW, screenH, videos, mergeDurationMs, countSeq, srcIdxPerStep } = plan;
+  const heroSec = plan.heroSecondaryMode === undefined ? 0 : plan.heroSecondaryMode;
+  const cCount = countSeq[si];
+  const srcIdx = srcIdxPerStep[si];
+
+  const aspectVideos = srcIdx.map(idx => ({ filename: videos[idx].filename, aspect: videos[idx].aspect > 0 ? videos[idx].aspect : 16 / 9 }));
+  const rects = packLayout(style, screenW, screenH, aspectVideos, mulberry32(seed ^ si), 0.1, heroSec);
+
+  const tiles = rects.map((r, i) => ({
+    srcVideo: srcIdx[i] !== undefined ? srcIdx[i] : 0,
+    from: { x: r.x, y: r.y, w: r.w, h: r.h },
+    to: { x: r.x, y: r.y, w: r.w, h: r.h },
+  }));
+
+  const out = [];
+  if (si === 0) {
+    out.push({ name: "grid", count: cCount, tiles, durationMs: 0, sharedSegmentMs: 0 });
+  } else {
+    const mergedTiles = tiles.map((cur) => {
+      let from = cur.from;
+      if (prevTiles && prevTiles.length > 0) {
+        const x = Math.min(...prevTiles.map(p => p.to.x));
+        const y = Math.min(...prevTiles.map(p => p.to.y));
+        const x2 = Math.max(...prevTiles.map(p => p.to.x + p.to.w));
+        const y2 = Math.max(...prevTiles.map(p => p.to.y + p.to.h));
+        from = { x, y, w: x2 - x, h: y2 - y };
+      }
+      return { srcVideo: cur.srcVideo, from, to: cur.to };
+    });
+    out.push({ name: "converge", count: cCount, tiles: mergedTiles, prevTiles, durationMs: mergeDurationMs, sharedSegmentMs: 0 });
+  }
+
+  if (si < countSeq.length - 1) {
+    out.push({ name: "hold", count: cCount, tiles, durationMs: 0, sharedSegmentMs: 1 });
+  }
+  return { tiles, phases: out };
+}
 
 /*
  * Linear interpolation between two rects at progress p in [0,1].
