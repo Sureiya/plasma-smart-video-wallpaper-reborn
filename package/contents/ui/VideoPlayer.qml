@@ -42,6 +42,12 @@ Item {
     property bool debugEnabled: false
     readonly property var creationDate: Date.now()
     property int loadingTime: 0
+    // When true, pausing (shouldPlay=false) also releases the decoded frame and
+    // GPU texture by stopping the MediaPlayer and detaching the video output.
+    // This is what actually frees VRAM when the desktop is covered. It is off by
+    // default because stop() resets position; tiles mode enables it since tiles
+    // loop infinitely and don't need exact position continuity.
+    property bool releaseFrameOnPause: false
 
     property int audioFadeInOutDuration: 5000
     property int loadAheadTime: 0
@@ -113,15 +119,61 @@ Item {
         player.stop();
     }
 
+    // When releaseFrameOnPause is enabled, pause() actually stops the player and
+    // detaches the video output so the decoded frame + GPU texture are freed.
+    // We stash the position first so it can be resumed seamlessly on play().
+    property int _pausedPosition: -1
+    property bool _released: false
+
     function updatePlaybackState() {
         if (debugEnabled) {
             console.log("VideoPlayer.updatePlaybackState() shouldPlay", shouldPlay);
         }
         if (shouldPlay) {
-            player.play();
+            if (root.releaseFrameOnPause && root._released) {
+                root._restoreFromRelease();
+            } else {
+                player.play();
+            }
         } else {
-            player.pause();
+            if (root.releaseFrameOnPause) {
+                root._releaseFrame();
+            } else {
+                player.pause();
+            }
         }
+    }
+
+    // Free the decoded frame and GPU texture: remember position, disconnect the
+    // output (which drops the last-rendered texture), and stop the player.
+    function _releaseFrame() {
+        if (root._released)
+            return;
+        root._pausedPosition = player.position;
+        if (debugEnabled) {
+            console.log("VideoPlayer._releaseFrame() at position", root._pausedPosition);
+        }
+        player.videoOutput = null;
+        player.stop();
+        root._released = true;
+    }
+
+    // Re-attach the output and resume from the stashed position (or 0).
+    function _restoreFromRelease() {
+        if (!root._released)
+            return;
+        root._released = false;
+        // Restore position BEFORE re-attaching the output, so any autoPlay that
+        // fires on re-attach resumes from the right frame rather than 0.
+        if (root._pausedPosition > 0) {
+            player.position = root._pausedPosition;
+            root._pausedPosition = -1;
+        }
+        player.videoOutput = videoOutput;
+        if (debugEnabled) {
+            console.log("VideoPlayer._restoreFromRelease()", player.position);
+        }
+        player.play();
     }
 
     onShouldPlayChanged: {

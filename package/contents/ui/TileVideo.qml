@@ -63,6 +63,11 @@ Item {
         shouldPlay: root.shouldPlay
         debugEnabled: root.debugEnabled
         loadAheadTime: root.loadAheadTime
+        // Tiles are the many-decoders case: when the desktop is covered, free
+        // each tile's decoded frame + GPU texture instead of just pausing. This
+        // is what drops VRAM to ~0 when offscreen. Tiles loop infinitely so
+        // losing exact position on resume is acceptable.
+        releaseFrameOnPause: true
     }
 
     function seek(ms) {
