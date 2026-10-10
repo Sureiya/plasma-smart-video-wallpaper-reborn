@@ -14,6 +14,7 @@ Item {
     property bool crossfadeEnabled
     property int targetCrossfadeDuration
     property bool changeWallpaperMode
+    property bool randomStartTime: false
     property alias muted: audioOutput.muted
     property alias fillMode: videoOutput.fillMode
     property alias loops: player.loops
@@ -84,6 +85,9 @@ Item {
     readonly property alias duration: player.duration
     readonly property alias videoHeight: videoOutput.contentRect.height
     readonly property alias videoWidth: videoOutput.contentRect.width
+    // Native aspect ratio (width/height) of the video, derived from the
+    // aspect-preserving output content rect. Sufficient for layout/orientation.
+    readonly property real videoAspect: videoHeight > 0 ? videoWidth / videoHeight : 1
     readonly property int remaining: duration - position
     readonly property bool showFillBlur: root.fillBlur && root.fitScale !== 1
     readonly property string currentAudioDevice: audioOutput.device ? audioOutput.device.description : i18n("Unknown")
@@ -198,7 +202,16 @@ Item {
             }
 
             if (mediaStatus === MediaPlayer.LoadedMedia && seekable) {
-                if (root.lastVideoPosition && root.lastVideoPosition < duration) {
+                if (root.randomStartTime) {
+                    // Start at a random position instead of resuming last or starting from the beginning
+                    const maxPosition = Math.max(0, duration - root.loadAheadTime - 1000);
+                    if (maxPosition > 0) {
+                        position = Math.floor(Math.random() * maxPosition);
+                    }
+                    if (root.debugEnabled) {
+                        console.log("RANDOM START POSITION:", position, "of", duration);
+                    }
+                } else if (root.lastVideoPosition && root.lastVideoPosition < duration) {
                     if (root.debugEnabled) {
                         console.log("RESTORE LAST POSITION:", root.lastVideoPosition);
                     }

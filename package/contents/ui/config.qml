@@ -42,6 +42,7 @@ ColumnLayout {
     property var wallpaperConfiguration: wallpaper.configuration
     property int cfg_FillMode: 2
     property int cfg_PauseMode: 0
+    property alias cfg_PauseCoveragePercent: pauseCoverageSpinBox.value
     property int cfg_AlternativePlaybackRateMode: 3
     property string cfg_AudioOutputDevice: ""
     property int cfg_BlurMode: 5
@@ -53,6 +54,8 @@ ColumnLayout {
     property alias cfg_BatteryDisablesBlur: batteryDisablesBlurCheckBox.checked
     property alias cfg_BlurRadius: blurRadiusSpinBox.value
     property string cfg_VideoUrls
+    property string cfg_Folders
+    property string cfg_FolderCache
     property bool isLoading: false
     property alias cfg_ScreenOffPausesVideo: screenOffPausesVideoCheckbox.checked
     property alias cfg_ScreenStateCmd: screenStateCmdTextField.text
@@ -80,9 +83,26 @@ ColumnLayout {
     property alias cfg_DayNightCycleTransitionDuration: dayNightCycleTransitionDuration.value
     property alias cfg_RandomMode: randomModeCheckbox.checked
     property alias cfg_ResumeLastVideo: resumeLastVideoCheckbox.checked
+    property alias cfg_AdvanceOnVideoEnd: advanceOnVideoEndCheckbox.checked
     property alias cfg_ChangeWallpaperTimerSeconds: wallpaperTimerSeconds.value
     property alias cfg_ChangeWallpaperTimerMinutes: wallpaperTimerMinutes.value
     property alias cfg_ChangeWallpaperTimerHours: wallpaperTimerHours.value
+    property alias cfg_RandomIntervalMinSeconds: randomIntervalMinSeconds.value
+    property alias cfg_RandomIntervalMinMinutes: randomIntervalMinMinutes.value
+    property alias cfg_RandomIntervalMinHours: randomIntervalMinHours.value
+    property alias cfg_RandomIntervalMaxSeconds: randomIntervalMaxSeconds.value
+    property alias cfg_RandomIntervalMaxMinutes: randomIntervalMaxMinutes.value
+    property alias cfg_RandomIntervalMaxHours: randomIntervalMaxHours.value
+    property alias cfg_RandomStartTime: randomStartTimeCheckbox.checked
+    property alias cfg_TilesMaxTiles: tilesMaxTilesSpinBox.value
+    property alias cfg_TilesMergeDuration: tilesMergeDurationSpinBox.value
+    property alias cfg_TilesRandomize: tilesRandomizeCheckbox.checked
+    property alias cfg_TilesAspectTolerance: tilesAspectToleranceSpinBox.value
+    property int cfg_TilesLayoutStyle: 0
+    property alias cfg_TilesTransformsBeforeFull: tilesTransformsSpinBox.value
+    property alias cfg_TilesSegmentMinS: tilesSegmentMinSpinBox.value
+    property alias cfg_TilesSegmentMaxS: tilesSegmentMaxSpinBox.value
+    property int cfg_TilesChoreographyMode: 0
     property alias cfg_FillBlur: blurRadioButton.checked
     property alias cfg_FillBlurRadius: fillBlurRadius.value
     property alias currentTab: tabBar.currentIndex
@@ -216,6 +236,7 @@ ColumnLayout {
             }
             videos.push({
                 filename: item.filename,
+                folder: item.folder === true,
                 enabled: item.enabled,
                 duration: item.duration,
                 customDuration: item.customDuration,
@@ -658,6 +679,14 @@ ColumnLayout {
                     {
                         text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "On a Timer"),
                         value: Enum.ChangeWallpaperMode.OnATimer
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "On a Random Interval"),
+                        value: Enum.ChangeWallpaperMode.RandomInterval
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Tiles"),
+                        value: Enum.ChangeWallpaperMode.Tiles
                     }
                 ]
                 textRole: "text"
@@ -739,6 +768,309 @@ ColumnLayout {
             }
         }
 
+        RowLayout {
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.RandomInterval
+            Label {
+                text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Min:")
+            }
+            SpinBox {
+                id: randomIntervalMinHours
+                from: 0
+                to: 12
+                stepSize: 1
+                editable: true
+                font.features: {
+                    "tnum": 1
+                }
+                readonly property regexp reExtractNum: /\D*?(-?\d*\.?\d*)\D*$/
+
+                validator: RegularExpressionValidator {
+                    regularExpression: randomIntervalMinHours.reExtractNum
+                }
+                textFromValue: function (value, locale) {
+                    return i18np("%1 hour", "%1 hours", value);
+                }
+                valueFromText: function (text, locale) {
+                    return Number.fromLocaleString(locale, reExtractNum.exec(text)[1]);
+                }
+            }
+            SpinBox {
+                id: randomIntervalMinMinutes
+                from: 0
+                to: 59
+                stepSize: 1
+                editable: true
+                font.features: {
+                    "tnum": 1
+                }
+                readonly property regexp reExtractNum: /\D*?(-?\d*\.?\d*)\D*$/
+
+                validator: RegularExpressionValidator {
+                    regularExpression: randomIntervalMinMinutes.reExtractNum
+                }
+                textFromValue: function (value, locale) {
+                    return i18np("%1 minute", "%1 minutes", value);
+                }
+                valueFromText: function (text, locale) {
+                    return parseInt(text);
+                }
+            }
+            SpinBox {
+                id: randomIntervalMinSeconds
+                from: (randomIntervalMinHours.value === 0 && randomIntervalMinMinutes.value === 0) ? 1 : 0
+                to: 59
+                stepSize: 1
+                editable: true
+                font.features: {
+                    "tnum": 1
+                }
+                readonly property regexp reExtractNum: /\D*?(-?\d*\.?\d*)\D*$/
+
+                validator: RegularExpressionValidator {
+                    regularExpression: randomIntervalMinSeconds.reExtractNum
+                }
+                textFromValue: function (value, locale) {
+                    return i18np("%1 second", "%1 seconds", value);
+                }
+                valueFromText: function (text, locale) {
+                    return Number.fromLocaleString(locale, reExtractNum.exec(text)[0]);
+                }
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.RandomInterval
+            Label {
+                text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Max:")
+            }
+            SpinBox {
+                id: randomIntervalMaxHours
+                from: 0
+                to: 12
+                stepSize: 1
+                editable: true
+                font.features: {
+                    "tnum": 1
+                }
+                readonly property regexp reExtractNum: /\D*?(-?\d*\.?\d*)\D*$/
+
+                validator: RegularExpressionValidator {
+                    regularExpression: randomIntervalMaxHours.reExtractNum
+                }
+                textFromValue: function (value, locale) {
+                    return i18np("%1 hour", "%1 hours", value);
+                }
+                valueFromText: function (text, locale) {
+                    return Number.fromLocaleString(locale, reExtractNum.exec(text)[1]);
+                }
+            }
+            SpinBox {
+                id: randomIntervalMaxMinutes
+                from: 0
+                to: 59
+                stepSize: 1
+                editable: true
+                font.features: {
+                    "tnum": 1
+                }
+                readonly property regexp reExtractNum: /\D*?(-?\d*\.?\d*)\D*$/
+
+                validator: RegularExpressionValidator {
+                    regularExpression: randomIntervalMaxMinutes.reExtractNum
+                }
+                textFromValue: function (value, locale) {
+                    return i18np("%1 minute", "%1 minutes", value);
+                }
+                valueFromText: function (text, locale) {
+                    return parseInt(text);
+                }
+            }
+            SpinBox {
+                id: randomIntervalMaxSeconds
+                from: (randomIntervalMaxHours.value === 0 && randomIntervalMaxMinutes.value === 0) ? 1 : 0
+                to: 59
+                stepSize: 1
+                editable: true
+                font.features: {
+                    "tnum": 1
+                }
+                readonly property regexp reExtractNum: /\D*?(-?\d*\.?\d*)\D*$/
+
+                validator: RegularExpressionValidator {
+                    regularExpression: randomIntervalMaxSeconds.reExtractNum
+                }
+                textFromValue: function (value, locale) {
+                    return i18np("%1 second", "%1 seconds", value);
+                }
+                valueFromText: function (text, locale) {
+                    return Number.fromLocaleString(locale, reExtractNum.exec(text)[0]);
+                }
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Max tiles:")
+            SpinBox {
+                id: tilesMaxTilesSpinBox
+                from: 1
+                to: 16
+                stepSize: 1
+                editable: true
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Merge duration (ms):")
+            SpinBox {
+                id: tilesMergeDurationSpinBox
+                from: 100
+                to: 10000
+                stepSize: 50
+                editable: true
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Aspect tolerance (%):")
+            SpinBox {
+                id: tilesAspectToleranceSpinBox
+                from: 0
+                to: 100
+                stepSize: 1
+                editable: true
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Transforms before full screen:")
+            SpinBox {
+                id: tilesTransformsSpinBox
+                from: 1
+                to: 12
+                stepSize: 1
+                editable: true
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Segment min (s):")
+            SpinBox {
+                id: tilesSegmentMinSpinBox
+                from: 1
+                to: 60
+                stepSize: 1
+                editable: true
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Segment max (s):")
+            SpinBox {
+                id: tilesSegmentMaxSpinBox
+                from: 1
+                to: 120
+                stepSize: 1
+                editable: true
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Choreography:")
+            ComboBox {
+                id: tilesChoreographyComboBox
+                model: [
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Merge to one"),
+                        value: Enum.TilesChoreographyMode.MergeToOne
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Maze walk"),
+                        value: Enum.TilesChoreographyMode.MazeWalk
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Reset"),
+                        value: Enum.TilesChoreographyMode.Reset
+                    }
+                ]
+                textRole: "text"
+                valueRole: "value"
+                onActivated: root.cfg_TilesChoreographyMode = currentValue
+                Component.onCompleted: {
+                    currentIndex = model.findIndex(m => m.value === root.cfg_TilesChoreographyMode);
+                }
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Layout style:")
+            ComboBox {
+                id: tilesLayoutStyleComboBox
+                model: [
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Brick (staggered masonry)"),
+                        value: Enum.TilesLayoutStyle.Brick
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Mosaic (packed interlock)"),
+                        value: Enum.TilesLayoutStyle.Mosaic
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Hero (one large featured)"),
+                        value: Enum.TilesLayoutStyle.Hero
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Collage (overlapping float)"),
+                        value: Enum.TilesLayoutStyle.Collage
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Columns (vertical masonry)"),
+                        value: Enum.TilesLayoutStyle.Columns
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Rows (horizontal bands)"),
+                        value: Enum.TilesLayoutStyle.Rows
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Spiral"),
+                        value: Enum.TilesLayoutStyle.Spiral
+                    },
+                    {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Random (switch each cycle)"),
+                        value: Enum.TilesLayoutStyle.Random
+                    }
+                ]
+                textRole: "text"
+                valueRole: "value"
+                onActivated: root.cfg_TilesLayoutStyle = currentValue
+                Component.onCompleted: {
+                    currentIndex = model.findIndex(style => style.value === root.cfg_TilesLayoutStyle);
+                }
+            }
+        }
+
+        CheckBox {
+            id: tilesRandomizeCheckbox
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Randomize tiles each cycle:")
+            visible: root.currentTab === 1 && changeWallpaperModeComboBox.currentIndex === Enum.ChangeWallpaperMode.Tiles
+        }
+
+        CheckBox {
+            id: randomStartTimeCheckbox
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Start at a random time:")
+            visible: root.currentTab === 1
+        }
+        Kirigami.ContextualHelpButton {
+            toolTipText: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Start playing each video at a random position instead of from the beginning.")
+        }
+
         CheckBox {
             id: randomModeCheckbox
             Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Random order:")
@@ -749,6 +1081,15 @@ ColumnLayout {
             id: resumeLastVideoCheckbox
             Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Resume last video on startup:")
             visible: root.currentTab === 1
+        }
+
+        CheckBox {
+            id: advanceOnVideoEndCheckbox
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Advance on video end:")
+            visible: root.currentTab === 1
+        }
+        Kirigami.ContextualHelpButton {
+            toolTipText: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Move to the next video when the current one finishes instead of looping. Individual videos with loop enabled will keep repeating.")
         }
 
         RowLayout {
@@ -875,6 +1216,10 @@ ColumnLayout {
                 {
                     text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Never"),
                     value: Enum.PauseMode.Never
+                },
+                {
+                    text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Screen covered"),
+                    value: Enum.PauseMode.ScreenCovered
                 }
             ]
             textRole: "text"
@@ -883,6 +1228,18 @@ ColumnLayout {
             onActivated: root.cfg_PauseMode = currentValue
             Component.onCompleted: {
                 currentIndex = model.findIndex(mode => mode.value === root.cfg_PauseMode);
+            }
+        }
+
+        RowLayout {
+            visible: root.currentTab === 1 && root.cfg_PauseMode === Enum.PauseMode.ScreenCovered
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Pause when screen covered above (%):")
+            SpinBox {
+                id: pauseCoverageSpinBox
+                from: 1
+                to: 100
+                stepSize: 1
+                editable: true
             }
         }
 
@@ -1700,6 +2057,22 @@ ColumnLayout {
                         onClicked: fileDialog.open()
                     }
                     ToolButton {
+                        text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Add folder…")
+                        icon.name: "folder-symbolic"
+                        onClicked: folderDialog.open()
+                    }
+                    BusyIndicator {
+                        visible: root.folderEnumRunning
+                        running: root.folderEnumRunning
+                        Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                        Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                    }
+                    Label {
+                        visible: root.folderEnumRunning || root.folderEnumStatus.length > 0
+                        text: root.folderEnumStatus
+                        elide: Text.ElideMiddle
+                    }
+                    ToolButton {
                         text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Enter path or url")
                         icon.name: "document-import-symbolic"
                         onClicked: videosModel.addItem()
@@ -1715,6 +2088,7 @@ ColumnLayout {
                     required property real alternativePlaybackRate
                     required property bool loop
                     required property int dayNightPhase
+                    required property bool folder
                     required property var model
                     readonly property string icon: Qt.resolvedUrl("../icons/dayNight/" + ["night", "sunrise", "day", "sunset", "disabled"][dayNightPhase] + ".svg")
                     // qmlformat off
@@ -1750,9 +2124,9 @@ ColumnLayout {
                             Button {
                                 flat: true
                                 hoverEnabled: true
-                                icon.name: "quickview-symbolic"
+                                icon.name: itemDelegate.folder ? "folder-symbolic" : "quickview-symbolic"
                                 onHoveredChanged: {
-                                    if (hovered) {
+                                    if (!itemDelegate.folder && hovered) {
                                         videoPreview.playerSource = itemDelegate.model;
                                     } else {
                                         videoPreview.playerSource = null;
@@ -1763,7 +2137,7 @@ ColumnLayout {
                                 Kirigami.Theme.inherit: true
                                 ToolTip.delay: 1000
                                 ToolTip.visible: hovered
-                                ToolTip.text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Preview")
+                                ToolTip.text: itemDelegate.folder ? i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Folder") : i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Preview")
                             }
                             Button {
                                 icon.name: itemDelegate.enabled ? "checkmark-symbolic" : "dialog-close-symbolic"
@@ -2028,6 +2402,122 @@ ColumnLayout {
                 }
             }
         }
+    }
+
+    FolderDialog {
+        id: folderDialog
+        title: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Pick a folder of videos")
+        onAccepted: {
+            // selectedFolder is a url; strip the file:// scheme to get a local
+            // path usable by `find`.
+            let folder = String(folderDialog.selectedFolder);
+            if (folder.startsWith("file://")) {
+                folder = folder.slice("file://".length);
+            }
+            root.enumerateFolder(folder);
+        }
+    }
+
+    RunCommand {
+        id: folderEnumCommand
+    }
+
+    // Signal emitted after a folder has been enumerated so the UI can refresh.
+    signal foldersChanged
+
+    // Enumeration progress state (shown in the header).
+    property bool folderEnumRunning: false
+    property string folderEnumStatus: ""
+
+    // Enumerate a folder recursively and cache all video files. The results
+    // feed playback directly (via FolderCache); they are added to the video list
+    // as a single folder row (not expanded), distinguished by the `folder` flag.
+    function enumerateFolder(folder) {
+        const cache = root.parseFolderCache();
+
+        // Add the folder row immediately so it is visible in the list.
+        if (!videosModel.fileExists(folder)) {
+            videosModel.addItem(folder, true);
+        }
+
+        const cached = cache[folder];
+        if (cached && cached.length > 0) {
+            root.folderEnumStatus = i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Folder already indexed");
+            return;
+        }
+
+        // Build a find command matching video extensions, newline-separated.
+        const conds = Utils.VIDEO_EXTENSIONS.map(e => `-iname "*${e}"`).join(" -o ");
+        const cmd = `find "${folder}" -type f \\( ${conds} \\) -print`;
+        console.log("[SVWR] enumerateFolder find cmd:", cmd);
+
+        root.folderEnumRunning = true;
+        root.folderEnumStatus = i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Enumerating folder…");
+
+        folderEnumCommand.exec(cmd, res => {
+            root.folderEnumRunning = false;
+            const out = res.stdout || "";
+            console.log("[SVWR] enumerateFolder exitCode:", res.exitCode, "stdout bytes:", out.length);
+            const files = out.split("\n").map(f => f.trim()).filter(f => f.length > 0).map(f => "file://" + f);
+            console.log("[SVWR] enumerateFolder found files:", files.length);
+            cache[folder] = files;
+            root.cfg_FolderCache = JSON.stringify(cache);
+            root.saveFolder(folder);
+            root.folderEnumStatus = i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Added %1 video(s)").arg(files.length);
+            root.foldersChanged();
+            inlineMessageComponent.createObject(messagesList, {
+                text: root.folderEnumStatus,
+                type: Kirigami.MessageType.Information
+            });
+        });
+    }
+
+    function parseFolderCache() {
+        try {
+            const c = JSON.parse(root.cfg_FolderCache || "{}");
+            return (c && typeof c === "object" && !Array.isArray(c)) ? c : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function saveFolder(folder) {
+        try {
+            let folders = JSON.parse(root.cfg_Folders || "[]");
+            if (!Array.isArray(folders)) folders = [];
+            if (folders.indexOf(folder) === -1) {
+                folders.push(folder);
+                root.cfg_Folders = JSON.stringify(folders);
+            }
+        } catch (e) {
+            root.cfg_Folders = JSON.stringify([folder]);
+        }
+    }
+
+    // Remove a folder row (and its cached files) from the list and cache.
+    function removeFolder(path) {
+        const cache = root.parseFolderCache();
+        delete cache[path];
+        root.cfg_FolderCache = JSON.stringify(cache);
+        try {
+            let folders = JSON.parse(root.cfg_Folders || "[]");
+            if (!Array.isArray(folders)) folders = [];
+            const idx = folders.indexOf(path);
+            if (idx !== -1) {
+                folders.splice(idx, 1);
+                root.cfg_Folders = JSON.stringify(folders);
+            }
+        } catch (e) {
+            root.cfg_Folders = "[]";
+        }
+        // Remove the matching row from the video list.
+        for (let i = videosModel.model.count - 1; i >= 0; i--) {
+            const item = videosModel.model.get(i);
+            if (item.folder === true && item.filename === path) {
+                videosModel.removeItem(i);
+            }
+        }
+        root.foldersChanged();
     }
 
     Kirigami.PromptDialog {

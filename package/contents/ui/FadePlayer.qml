@@ -23,6 +23,8 @@ StackView {
     property bool _restoreLastPosition: true
     property bool debugEnabled: false
     property int changeWallpaperMode: Enum.ChangeWallpaperMode.Slideshow
+    property bool advanceOnVideoEnd: true
+    property bool randomStartTime: false
     property int fillBlurRadius: 32
     property bool fillBlur: true
     property real alternativePlaybackRateGlobal: 0.5
@@ -30,13 +32,23 @@ StackView {
     property string audioOutputDevice
     property bool shouldPlay: true
     property int loops: {
-        if ((changeWallpaperMode === Enum.ChangeWallpaperMode.Never || !multipleVideos) && !crossfadeEnabled) {
+        if (crossfadeEnabled) {
+            return 1;
+        }
+        // A video with loop enabled (or the only video) keeps repeating natively.
+        if (currentSource?.loop === true || !multipleVideos) {
             return MediaPlayer.Infinite;
         }
-        return 1;
+        // When advance-on-end is enabled (or slideshow mode), reach EndOfMedia
+        // so it can move on to the next video.
+        if (advanceOnVideoEnd || changeWallpaperMode === Enum.ChangeWallpaperMode.Slideshow) {
+            return 1;
+        }
+        // Never / timer modes without the advance toggle: keep looping the same video.
+        return MediaPlayer.Infinite;
     }
 
-    property list<var> propertiesMonitor: [currentSource, globalVolume, muted, fillMode, targetCrossfadeDuration, loops, changeWallpaperMode, fillBlurRadius, fillBlur, audioOutputDevice, crossfadeEnabled, debugEnabled, useAlternativePlaybackRate, alternativePlaybackRateGlobal, globalPlaybackRate, audioFadeInOutDuration, loadAheadTime]
+    property list<var> propertiesMonitor: [currentSource, globalVolume, muted, fillMode, targetCrossfadeDuration, loops, changeWallpaperMode, advanceOnVideoEnd, fillBlurRadius, fillBlur, audioOutputDevice, crossfadeEnabled, debugEnabled, useAlternativePlaybackRate, alternativePlaybackRateGlobal, globalPlaybackRate, audioFadeInOutDuration, loadAheadTime]
 
     onPropertiesMonitorChanged: {
         if (root.currentItem) {
@@ -46,6 +58,7 @@ StackView {
             root.currentItem.targetCrossfadeDuration = root.targetCrossfadeDuration;
             root.currentItem.loops = root.loops;
             root.currentItem.changeWallpaperMode = root.changeWallpaperMode;
+            root.currentItem.randomStartTime = root.randomStartTime;
             root.currentItem.fillBlurRadius = root.fillBlurRadius;
             root.currentItem.fillBlur = root.fillBlur;
             root.currentItem.audioOutputDevice = root.audioOutputDevice;
@@ -113,6 +126,7 @@ StackView {
             "videoPlaybackRate": root.currentSource?.playbackRate ?? 0,
             "videoAlternativePlaybackRate": root.currentSource?.alternativePlaybackRate ?? 0,
             "changeWallpaperMode": root.changeWallpaperMode,
+            "randomStartTime": root.randomStartTime,
             "shouldPlay": Qt.binding(() => root.shouldPlay),
             "lastVideoPosition": root.resumeLastVideo && root._restoreLastPosition ? root.lastVideoPosition : 0,
             "debugEnabled": root.debugEnabled,

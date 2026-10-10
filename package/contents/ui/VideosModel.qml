@@ -20,9 +20,10 @@ Item {
         root.isLoading = false;
     }
 
-    function addItem(file) {
+    function addItem(file, isFolder) {
         model.append({
             "filename": file ?? "",
+            "folder": isFolder === true,
             "enabled": true,
             "duration": 0,
             "customDuration": 0,

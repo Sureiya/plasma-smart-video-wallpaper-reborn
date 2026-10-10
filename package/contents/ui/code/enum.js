@@ -14,6 +14,25 @@ const ChangeWallpaperMode = {
   Never: 0,
   Slideshow: 1,
   OnATimer: 2,
+  RandomInterval: 3,
+  Tiles: 4,
+};
+
+const TilesLayoutStyle = {
+  Brick: 0,
+  Mosaic: 1,
+  Hero: 2,
+  Collage: 3,
+  Columns: 4,
+  Rows: 5,
+  Spiral: 6,
+  Random: 7,
+};
+
+const TilesChoreographyMode = {
+  MergeToOne: 0,
+  MazeWalk: 1,
+  Reset: 2,
 };
 
 const DayNightPhase = {
@@ -37,7 +56,8 @@ const PauseMode = {
   MaximizedOrFullScreen: 0,
   ActiveWindowPresent: 1,
   WindowVisible: 2,
-  Never: 3
+  Never: 3,
+  ScreenCovered: 4
 };
 
 const BlurMode = {

@@ -15,6 +15,9 @@ Item {
     property var isWindow: abstractTasksModel.IsWindow
     property var isFullScreen: abstractTasksModel.IsFullScreen
     property var isMinimized: abstractTasksModel.IsMinimized
+    property var geometry: abstractTasksModel.Geometry
+    property var screenGeometryRole: abstractTasksModel.ScreenGeometry
+    property real coveragePercent: 0
     property bool filterByActive: false
     property bool filterByScreen: false
     property bool trackLastActive: false
@@ -35,6 +38,19 @@ Item {
             }
         }
         return highestTask;
+    }
+
+    // Intersection area of two rects {x,y,width,height}.
+    function intersectArea(a, b) {
+        const ax = a.x, ay = a.y, aw = a.width, ah = a.height;
+        const bx = b.x, by = b.y, bw = b.width, bh = b.height;
+        const x1 = Math.max(ax, bx);
+        const y1 = Math.max(ay, by);
+        const x2 = Math.min(ax + aw, bx + bw);
+        const y2 = Math.min(ay + ah, by + bh);
+        const w = x2 - x1;
+        const h = y2 - y1;
+        return (w > 0 && h > 0) ? w * h : 0;
     }
 
     function updateWindowsInfo() {
@@ -78,10 +94,35 @@ Item {
             _visibleExists = _activeExists;
         }
 
+        // Compute the fraction (0..100) of the screen covered by visible windows.
+        root.updateCoverage();
+
         activeExists = _activeExists;
         fullscreenExists = _fullscreenExists;
         maximizedExists = _maximizedExists;
         visibleExists = _visibleExists;
+    }
+
+    function updateCoverage() {
+        const scr = root.screenGeometry;
+        if (!scr || !scr.width || !scr.height) {
+            root.coveragePercent = 0;
+            return;
+        }
+        const screenArea = scr.width * scr.height;
+        let covered = 0;
+        for (var i = 0; i < tasksModel.count; i++) {
+            const currentTask = tasksModel.index(i, 0);
+            if (currentTask === undefined || !tasksModel.data(currentTask, isWindow))
+                continue;
+            if (tasksModel.data(currentTask, isMinimized))
+                continue;
+            const geom = tasksModel.data(currentTask, geometry);
+            if (!geom || !geom.width || !geom.height)
+                continue;
+            covered += root.intersectArea(geom, scr);
+        }
+        root.coveragePercent = screenArea > 0 ? Math.min(100, covered / screenArea * 100) : 0;
     }
 
     Connections {

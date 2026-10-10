@@ -8,6 +8,7 @@ function parseCompat(cfgStr) {
       video.playbackRate = video.playbackRate ?? 0.0;
       video.alternativePlaybackRate = video.alternativePlaybackRate ?? 0.0;
       video.loop = video.loop ?? false;
+      video.folder = video.folder ?? false;
       video.dayNightPhase = video.dayNightPhase ?? Enum.DayNightPhase.Unknown;
       videos.push(video);
     });
@@ -32,6 +33,10 @@ const Video = {
   alternativePlaybackRate: 0.0,
   loop: false,
   dayNightCycleAssignment: 0,
+  folder: false,
+  aspect: 0,
+  width: 0,
+  height: 0,
 };
 
 /**
@@ -83,7 +88,9 @@ function getMatchingVideos(videos, dayNightPhase) {
  * @returns {Array.<Video>} List of videos matching the criteria
  */
 function getVideos(dayNightCycleEnabled, dayNightPhase, videoUrls) {
-  const videos = parseCompat(videoUrls).filter(video => video.enabled);
+  // Exclude folder entries: they are placeholders in the UI list, not playable
+  // files. Their contents come separately via getFolderVideos().
+  const videos = parseCompat(videoUrls).filter(video => video.enabled && video.folder !== true);
 
   if (!dayNightCycleEnabled) {
     return videos;
@@ -196,6 +203,87 @@ function shuffleArray(array) {
   }
 }
 
+/**
+ * Fisher-Yates shuffle returning a NEW permutation of the indices 0..n-1.
+ * Used to drive "play all files once before repeating" random order.
+ */
+function shuffledIndices(n) {
+  const idx = [];
+  for (let i = 0; i < n; i++) idx.push(i);
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = idx[i];
+    idx[i] = idx[j];
+    idx[j] = t;
+  }
+  return idx;
+}
+
+/**
+ * Get all video files from cached folders as a flat list of Video objects.
+ * Does not re-scan the filesystem: it reads the JSON cache written by the
+ * config dialog's folder enumeration. Returns [] if nothing cached.
+ *
+ * @param {string} foldersJson     the Folders config string (JSON array)
+ * @param {string} folderCacheJson the FolderCache config string (JSON object)
+ * @returns {Array.<Video>}
+ */
+function getFolderVideos(foldersJson, folderCacheJson) {
+  const out = [];
+  let folders = [];
+  let cache = {};
+  try {
+    folders = JSON.parse(foldersJson || "[]");
+    if (!Array.isArray(folders)) folders = [];
+  } catch (e) {
+    folders = [];
+  }
+  try {
+    cache = JSON.parse(folderCacheJson || "{}");
+    if (!cache || typeof cache !== "object" || Array.isArray(cache)) cache = {};
+  } catch (e) {
+    cache = {};
+  }
+  for (const folder of folders) {
+    const files = cache[folder];
+    if (Array.isArray(files)) {
+      for (const f of files) {
+        out.push(createVideo(f));
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Parse a metadata cache JSON string into an object { path: {aspect,width,height,duration} }.
+ */
+function parseMetadataCache(json) {
+  if (!json) return {};
+  try {
+    const c = JSON.parse(json);
+    return (c && typeof c === "object" && !Array.isArray(c)) ? c : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+/**
+ * Look up cached metadata for a video path, returning {aspect,width,height,duration}
+ * or null when unknown.
+ */
+function getCachedMetadata(metaCache, path) {
+  if (!metaCache || !path) return null;
+  const m = metaCache[path];
+  return m && (m.width > 0 || m.aspect > 0) ? m : null;
+}
+
+/**
+ * Video file extensions accepted when enumerating folders.
+ */
+const VIDEO_EXTENSIONS = [".mp4", ".mpg", ".mpeg", ".ogv", ".mov", ".webm", ".flv", ".mkv", ".avi", ".wmv", ".gif", ".m4v", ".ts", ".m2ts"];
+
+
 // https://stackoverflow.com/questions/28507619/how-to-create-delay-function-in-qml
 function delay(interval, callback, parentItem) {
   let timer = Qt.createQmlObject("import QtQuick; Timer {}", parentItem);
@@ -256,3 +344,41 @@ function gVariantTupleToArray(str) {
 function easeInOutCubic(x) {
   return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
 }
+
+/**
+ * Memoize an expensive, deterministic function with an LRU cache.
+ * Keys are built by JSON-stringifying the argument array. Only suitable for
+ * functions whose results depend solely on their (JSON-serializable) arguments
+ * and have no side effects — exactly the pure layout/graph helpers here.
+ *
+ * @param {Function} fn     function to memoize
+ * @param {number} capacity max number of cached results (LRU eviction)
+ */
+function memoize(fn, capacity) {
+  const cap = capacity && capacity > 0 ? capacity : 128;
+  const cache = new Map();
+  const wrapped = function (...args) {
+    let key;
+    try {
+      key = JSON.stringify(args);
+    } catch (e) {
+      return fn.apply(this, args); // unserializable args: don't cache
+    }
+    if (cache.has(key)) {
+      const hit = cache.get(key);
+      // Refresh recency (LRU).
+      cache.delete(key);
+      cache.set(key, hit);
+      return hit;
+    }
+    const val = fn.apply(this, args);
+    cache.set(key, val);
+    if (cache.size > cap) {
+      cache.delete(cache.keys().next().value); // evict oldest
+    }
+    return val;
+  };
+  wrapped.cache = cache; // expose for manual clear/eviction
+  return wrapped;
+}
+

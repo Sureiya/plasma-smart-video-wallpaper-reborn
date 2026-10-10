@@ -10,6 +10,18 @@
       <label>List of video urls</label>
       <default>[]</default>
     </entry>
+    <entry name="Folders" type="String">
+      <label>Folder paths to enumerate recursively</label>
+      <default>[]</default>
+    </entry>
+    <entry name="FolderCache" type="String">
+      <label>JSON cache of enumerated video files per folder</label>
+      <default>{}</default>
+    </entry>
+    <entry name="VideoMetadataCache" type="String">
+      <label>JSON cache of per-video metadata (aspect, resolution, duration)</label>
+      <default>{}</default>
+    </entry>
     <entry name="BackgroundColor" type="String">
       <label>Background color</label>
       <default>#000000</default>
@@ -30,6 +42,10 @@
     -->
     <entry name="PauseMode" type="Int">
       <default>0</default>
+    </entry>
+    <entry name="PauseCoveragePercent" type="Int">
+      <label>Pause video when visible windows cover more than this percent of the screen</label>
+      <default>75</default>
     </entry>
     <entry name="PauseBatteryLevel" type="Int">
       <default>10</default>
@@ -147,6 +163,30 @@
     <entry name="ChangeWallpaperTimerHours" type="Int">
       <default>0</default>
     </entry>
+    <!-- Minimum random interval to change wallpaper (hours/minutes/seconds) -->
+    <entry name="RandomIntervalMinHours" type="Int">
+      <default>0</default>
+    </entry>
+    <entry name="RandomIntervalMinMinutes" type="Int">
+      <default>1</default>
+    </entry>
+    <entry name="RandomIntervalMinSeconds" type="Int">
+      <default>0</default>
+    </entry>
+    <!-- Maximum random interval to change wallpaper (hours/minutes/seconds) -->
+    <entry name="RandomIntervalMaxHours" type="Int">
+      <default>0</default>
+    </entry>
+    <entry name="RandomIntervalMaxMinutes" type="Int">
+      <default>30</default>
+    </entry>
+    <entry name="RandomIntervalMaxSeconds" type="Int">
+      <default>0</default>
+    </entry>
+    <entry name="RandomStartTime" type="Bool">
+      <label>Start playing each video at a random position</label>
+      <default>False</default>
+    </entry>
     <entry name="DayNightCycleMode" type="Int">
       <label>Mode</label>
       <default>0</default>
@@ -195,6 +235,47 @@
     </entry>
     <entry name="LoadAheadTime" type="Int">
       <default>1000</default>
+    </entry>
+    <entry name="AdvanceOnVideoEnd" type="Bool">
+      <label>Play the next video when the current one ends instead of looping</label>
+      <default>true</default>
+    </entry>
+    <!-- Tiles mode: play multiple videos simultaneously in a masonry layout -->
+    <entry name="TilesMaxTiles" type="Int">
+      <label>Maximum number of simultaneous video tiles</label>
+      <default>6</default>
+    </entry>
+    <entry name="TilesMergeDuration" type="Int">
+      <label>Duration in ms of the tile merge animation</label>
+      <default>1500</default>
+    </entry>
+    <entry name="TilesRandomize" type="Bool">
+      <label>Reshuffle tile assignment each merge cycle</label>
+      <default>true</default>
+    </entry>
+    <entry name="TilesAspectTolerance" type="Int">
+      <label>Percent of stretch/crop tolerated before relaxing a tile's aspect</label>
+      <default>10</default>
+    </entry>
+    <entry name="TilesLayoutStyle" type="Int">
+      <label>Tile layout style (0=Brick, 1=Mosaic, 2=Hero, 3=Collage)</label>
+      <default>0</default>
+    </entry>
+    <entry name="TilesTransformsBeforeFull" type="Int">
+      <label>Number of converge transforms before tiles reach full screen</label>
+      <default>5</default>
+    </entry>
+    <entry name="TilesSegmentMinS" type="Int">
+      <label>Minimum video segment length in seconds</label>
+      <default>3</default>
+    </entry>
+    <entry name="TilesSegmentMaxS" type="Int">
+      <label>Maximum video segment length in seconds</label>
+      <default>15</default>
+    </entry>
+    <entry name="TilesChoreographyMode" type="Int">
+      <label>Tile choreography (0=merge to one, 1=maze walk)</label>
+      <default>0</default>
     </entry>
   </group>
 </kcfg>

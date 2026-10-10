@@ -37,7 +37,13 @@ WallpaperItem {
     anchors.fill: parent
     property bool isLoading: true
     property string videoUrls: main.configuration.VideoUrls
+    property string folders: main.configuration.Folders
+    property string folderCache: main.configuration.FolderCache
     property list<var> videosConfig: []
+    property var randomOrder: []            // shuffled index permutation for random mode
+    property string lastRandomSignature: ""  // fingerprint of the current file set
+    property var cachedFolderVideos: []      // parsed FolderCache, refreshed only on change
+    property string cachedFolderSig: ""      // signature of the FolderCache string we last parsed
     property int longestLoadingTime: 0
     property string longestLoadingVideo
     readonly property int currentLoadingTime: player.player?.loadingTime ?? 0
@@ -73,6 +79,7 @@ WallpaperItem {
         return Utils.getVideoByIndex(currentVideoIndex, videosConfig);
     }
     property int pauseBatteryLevel: main.configuration.PauseBatteryLevel
+    property int pauseCoveragePercent: main.configuration.PauseCoveragePercent
     property bool shouldPlay: {
         if (lockScreenMode) {
             return true;
@@ -97,6 +104,10 @@ WallpaperItem {
             break;
         case Enum.PauseMode.Never:
             pause = false;
+            break;
+        case Enum.PauseMode.ScreenCovered:
+            pause = windowModel.coveragePercent >= main.pauseCoveragePercent;
+            break;
         }
         return !pause;
     }
@@ -168,9 +179,27 @@ WallpaperItem {
     property bool randomMode: main.configuration.RandomMode
     property int lastVideoPosition: main.configuration.LastVideoPosition
     property int changeWallpaperMode: main.configuration.ChangeWallpaperMode
+    property bool advanceOnVideoEnd: main.configuration.AdvanceOnVideoEnd
     property int changeWallpaperTimerSeconds: main.configuration.ChangeWallpaperTimerSeconds
     property int changeWallpaperTimerMinutes: main.configuration.ChangeWallpaperTimerMinutes
     property int changeWallpaperTimerHours: main.configuration.ChangeWallpaperTimerHours
+    property int randomIntervalMinSeconds: main.configuration.RandomIntervalMinSeconds
+    property int randomIntervalMinMinutes: main.configuration.RandomIntervalMinMinutes
+    property int randomIntervalMinHours: main.configuration.RandomIntervalMinHours
+    property int randomIntervalMaxSeconds: main.configuration.RandomIntervalMaxSeconds
+    property int randomIntervalMaxMinutes: main.configuration.RandomIntervalMaxMinutes
+    property int randomIntervalMaxHours: main.configuration.RandomIntervalMaxHours
+    property bool randomStartTime: main.configuration.RandomStartTime
+    property int tilesMaxTiles: main.configuration.TilesMaxTiles
+    property int tilesMergeDuration: main.configuration.TilesMergeDuration
+    property bool tilesRandomize: main.configuration.TilesRandomize
+    property int tilesAspectTolerance: main.configuration.TilesAspectTolerance
+    property int tilesLayoutStyle: main.configuration.TilesLayoutStyle
+    property int tilesTransformsBeforeFull: main.configuration.TilesTransformsBeforeFull
+    property int tilesChoreographyMode: main.configuration.TilesChoreographyMode
+    property int tilesSegmentMinMs: main.configuration.TilesSegmentMinS * 1000
+    property int tilesSegmentMaxMs: main.configuration.TilesSegmentMaxS * 1000
+    readonly property bool tilesMode: main.changeWallpaperMode === Enum.ChangeWallpaperMode.Tiles
     property bool dayNightCycleEnabled: main.configuration.DayNightCycleMode !== Enum.DayNightCycleMode.Disabled
     property bool muteAudio: {
         if (muteOverride === Enum.MuteOverride.Mute) {
@@ -299,11 +328,13 @@ WallpaperItem {
     }
 
     function nextVideo(forceSwitch) {
-        if (main.changeWallpaperMode !== Enum.ChangeWallpaperMode.Slideshow || currentSource.loop || main.videosConfig.length === 1) {
+        const loopThisVideo = currentSource.loop || main.videosConfig.length === 1;
+        const advance = main.advanceOnVideoEnd || main.changeWallpaperMode === Enum.ChangeWallpaperMode.Slideshow;
+        if (!loopThisVideo && advance) {
+            setNextSource();
+        } else {
             player.player.ending = true;
             player.loadVideo();
-        } else {
-            setNextSource();
         }
     }
     // qmlformat off
@@ -314,14 +345,42 @@ WallpaperItem {
     }
     // qmlformat on
 
+    property int randomIntervalMinMs: {
+        return ((main.randomIntervalMinHours * 60 * 60)
+        + (main.randomIntervalMinMinutes * 60)
+        + main.randomIntervalMinSeconds) * 1000
+    }
+
+    property int randomIntervalMaxMs: {
+        return ((main.randomIntervalMaxHours * 60 * 60)
+        + (main.randomIntervalMaxMinutes * 60)
+        + main.randomIntervalMaxSeconds) * 1000
+    }
+
+    property int randomIntervalSeed: 0
+
+    function randomIntervalMs() {
+        const min = Math.min(main.randomIntervalMinMs, main.randomIntervalMaxMs);
+        const max = Math.max(main.randomIntervalMinMs, main.randomIntervalMaxMs);
+        return min + Math.floor(Math.random() * (max - min + 1));
+    }
+
     PausableTimer {
         id: changeTimer
-        running: main.changeWallpaperMode === Enum.ChangeWallpaperMode.OnATimer && player.player.playing && !main.currentSource.loop
-        interval: main.changeWallpaperTimerMs
+        running: !main.tilesMode
+            && (main.changeWallpaperMode === Enum.ChangeWallpaperMode.OnATimer
+            || main.changeWallpaperMode === Enum.ChangeWallpaperMode.RandomInterval)
+            && player.player.playing && !main.currentSource.loop
+        interval: main.changeWallpaperMode === Enum.ChangeWallpaperMode.RandomInterval
+            ? (main.randomIntervalSeed, main.randomIntervalMs())
+            : main.changeWallpaperTimerMs
         repeat: true
         useNewIntervalImmediately: true
         onTriggered: {
             printLog("Timer triggered, changing wallpaper");
+            if (main.changeWallpaperMode === Enum.ChangeWallpaperMode.RandomInterval) {
+                main.randomIntervalSeed++;
+            }
             main.skipNext();
         }
         onIntervalChanged: {
@@ -339,16 +398,18 @@ WallpaperItem {
             anchors.fill: parent
             muted: main.muteAudio
             lastVideoPosition: main.configuration.LastVideoPosition
-            visible: main.videosConfig.length !== 0
+            visible: main.videosConfig.length !== 0 && !main.tilesMode
             onSetNextSource: {
                 printLog("main.player.onSetNextSource");
                 main.nextVideo();
             }
-            crossfadeEnabled: main.crossfadeEnabled
+            crossfadeEnabled: main.crossfadeEnabled && !main.tilesMode
             multipleVideos: main.videosConfig.length > 1
             targetCrossfadeDuration: main.configuration.CrossfadeDuration
             debugEnabled: main.debugEnabled
             changeWallpaperMode: main.changeWallpaperMode
+            advanceOnVideoEnd: main.advanceOnVideoEnd
+            randomStartTime: main.randomStartTime
             fillMode: main.configuration.FillMode
             fillBlur: main.configuration.FillBlur && !main.batteryDisablesBlur
             fillBlurRadius: main.configuration.FillBlurRadius
@@ -358,9 +419,46 @@ WallpaperItem {
             alternativePlaybackRateGlobal: main.configuration.AlternativePlaybackRate
             resumeLastVideo: main.configuration.ResumeLastVideo
             audioOutputDevice: main.configuration.AudioOutputDevice
-            shouldPlay: main.playing
+            // Fully stop the full-screen player in tiles mode so its own
+            // MediaPlayer/decoder doesn't keep running in parallel with the tiles.
+            shouldPlay: main.playing && !main.tilesMode
             audioFadeInOutDuration: main.configuration.AudioFadeInOutDuration * 1000
             loadAheadTime: main.configuration.LoadAheadTime
+        }
+
+        Loader {
+            id: tilesPlayerLoader
+            anchors.fill: parent
+            active: main.tilesMode
+            sourceComponent: tilesPlayerComponent
+        }
+    }
+
+    Component {
+        id: tilesPlayerComponent
+        TilesPlayer {
+            anchors.fill: parent
+            videosConfig: main.videosConfig
+            maxTiles: main.tilesMaxTiles
+            mergeDuration: main.tilesMergeDuration
+            randomize: main.tilesRandomize
+            aspectTolerance: main.tilesAspectTolerance / 100.0
+            layoutStyle: main.tilesLayoutStyle
+            transformCountBeforeFull: main.tilesTransformsBeforeFull
+            choreographyMode: main.tilesChoreographyMode
+            metadataCacheJson: main.configuration.VideoMetadataCache
+            segmentMinMs: main.tilesSegmentMinMs
+            segmentMaxMs: main.tilesSegmentMaxMs
+            backgroundColor: main.configuration.BackgroundColor
+            muted: main.muteAudio
+            fillMode: main.configuration.FillMode
+            fillBlur: main.configuration.FillBlur && !main.batteryDisablesBlur
+            fillBlurRadius: main.configuration.FillBlurRadius
+            globalVolume: main.volume
+            globalPlaybackRate: main.playbackRate
+            audioOutputDevice: main.configuration.AudioOutputDevice
+            shouldPlay: main.playing
+            debugEnabled: main.debugEnabled
         }
     }
     FastBlur {
@@ -423,7 +521,7 @@ WallpaperItem {
                         text += `player.loops: ${player.loops === MediaPlayer.Infinite}\n`;
                         text += `player.depth: ${player.depth}\n`;
                         text += `currentVideoIndex: ${main.currentVideoIndex}\n`;
-                        text += `changeWallpaperMode: ${["Never", "Slideshow", `OnATimer time: ${changeTimer.interval}`][main.changeWallpaperMode]}\n`;
+                        text += `changeWallpaperMode: ${["Never", "Slideshow", `OnATimer time: ${changeTimer.interval}`, `RandomInterval: ${changeTimer.interval}`][main.changeWallpaperMode] ?? main.changeWallpaperMode}\n`;
                         text += `crossfade: ${player.player.crossfadeEnabled}\n`;
                         text += `crossfadeDuration: ${player.targetCrossfadeDuration} current: ${player.player.crossfadeDuration}\n`;
                         text += `loadAheadTime: ${player.player.loadAheadTime}\n`;
@@ -524,7 +622,11 @@ WallpaperItem {
             printLog("main.videosConfig changed, currentSource no longer exists, skipping to next video");
             main.skipNext();
         }
-        printLog("Videos: '" + JSON.stringify(videosConfig) + "'");
+        // Avoid eagerly JSON-stringifying the whole (possibly huge) list when
+        // debug logging is off — this was a major freeze cause on Apply.
+        if (debugEnabled) {
+            printLog("Videos: '" + JSON.stringify(videosConfig) + "'");
+        }
     }
     onShouldPlayChanged: logShouldPlay()
     onPlayingChanged: printLog("Video playing: " + playing)
@@ -546,27 +648,100 @@ WallpaperItem {
         });
     }
     function updateVideosConfig() {
-        const videos = Utils.getVideos(dayNightCycleEnabled, dayNightPhase, videoUrls);
-        if (randomMode) {
-            Utils.shuffleArray(videos);
+        // Merge explicit videos with the cached folder enumeration (folder
+        // files are not in the UI list, so they come solely from FolderCache).
+        let videos = Utils.getVideos(dayNightCycleEnabled, dayNightPhase, videoUrls);
+
+        // Only re-parse the FolderCache when its string actually changed —
+        // parsing thousands of paths on every config change froze Apply.
+        const folderSig = main.folders + "\u0002" + main.folderCache;
+        if (folderSig !== main.cachedFolderSig) {
+            main.cachedFolderVideos = Utils.getFolderVideos(main.folders, main.folderCache);
+            main.cachedFolderSig = folderSig;
         }
-        videosConfig = videos;
+        if (main.cachedFolderVideos.length > 0) {
+            videos = videos.concat(main.cachedFolderVideos);
+        }
+
+        if (randomMode) {
+            // Reshuffle only when the underlying inputs changed (not on every
+            // redundant updateVideosConfig call). Signature = the input strings,
+            // which fully determine the output list.
+            const sig = main.videoUrls + "\u0001" + main.folders + "\u0001" + main.folderCache;
+            if (sig !== main.lastRandomSignature || !main.randomOrder.length) {
+                main.randomOrder = Utils.shuffledIndices(videos.length);
+                main.lastRandomSignature = sig;
+            }
+            const ordered = main.randomOrder.map(i => videos[i]);
+            videosConfig = ordered;
+        } else {
+            videosConfig = videos;
+        }
+    }
+
+    // Debounced rebuild: coalesces many rapid config changes (e.g. an Apply that
+    // changes several keys at once) into a single updateVideosConfig() call,
+    // avoiding redundant full rebuilds of a huge list on the UI thread.
+    property bool videosRebuildQueued: false
+    function requestVideosConfigRebuild() {
+        if (main.videosRebuildQueued) {
+            return;
+        }
+        main.videosRebuildQueued = true;
+        Qt.callLater(() => {
+            main.videosRebuildQueued = false;
+            main.updateVideosConfig();
+        });
     }
 
     onDayNightCycleEnabledChanged: {
-        Qt.callLater(updateVideosConfig);
+        requestVideosConfigRebuild();
     }
     onDayNightPhaseChanged: {
-        Qt.callLater(updateVideosConfig);
+        requestVideosConfigRebuild();
         printLog("DayNight phase changed: " + dayNightPhase);
     }
     onVideoUrlsChanged: {
-        Qt.callLater(updateVideosConfig);
+        requestVideosConfigRebuild();
     }
     onRandomModeChanged: {
-        Qt.callLater(updateVideosConfig);
+        requestVideosConfigRebuild();
         printLog("Random mode changed: " + main.randomMode);
     }
+
+    // Rebuild the list when cached folders change (folder added/removed).
+    onFoldersChanged: {
+        requestVideosConfigRebuild();
+    }
+    onFolderCacheChanged: {
+        requestVideosConfigRebuild();
+    }
+
+    // Persist the random-interval / random-start-time settings as soon as
+    // they change. These keys were added to main.xml after the plugin was
+    // already loaded in some sessions, so relying solely on the config
+    // dialog's cfg_* auto-sync can drop them until a plasmashell restart.
+    // Explicitly flushing here guarantees they are always written.
+    function flushWallpaperConfig() {
+        main.configuration.writeConfig();
+    }
+
+    onRandomStartTimeChanged: flushWallpaperConfig()
+    onRandomIntervalMinSecondsChanged: flushWallpaperConfig()
+    onRandomIntervalMinMinutesChanged: flushWallpaperConfig()
+    onRandomIntervalMinHoursChanged: flushWallpaperConfig()
+    onRandomIntervalMaxSecondsChanged: flushWallpaperConfig()
+    onRandomIntervalMaxMinutesChanged: flushWallpaperConfig()
+    onRandomIntervalMaxHoursChanged: flushWallpaperConfig()
+    onTilesMaxTilesChanged: flushWallpaperConfig()
+    onTilesMergeDurationChanged: flushWallpaperConfig()
+    onTilesRandomizeChanged: flushWallpaperConfig()
+    onTilesAspectToleranceChanged: flushWallpaperConfig()
+    onTilesLayoutStyleChanged: flushWallpaperConfig()
+    onTilesTransformsBeforeFullChanged: flushWallpaperConfig()
+    onTilesSegmentMinMsChanged: flushWallpaperConfig()
+    onTilesSegmentMaxMsChanged: flushWallpaperConfig()
+    onTilesChoreographyModeChanged: flushWallpaperConfig()
 
     Component.onCompleted: {
         startTimer.start();
@@ -606,12 +781,18 @@ WallpaperItem {
 
     contextualActions: [
         PlasmaCore.Action {
-            text: i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Next Video")
+            text: main.tilesMode
+                ? i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Next Transform")
+                : i18nd("plasma_wallpaper_luisbocanegra.smart.video.wallpaper.reborn", "Next Video")
             icon.name: "media-skip-forward"
             onTriggered: {
-                main.skipNext();
+                if (main.tilesMode && tilesPlayerLoader.item) {
+                    tilesPlayerLoader.item.nextTransform();
+                } else {
+                    main.skipNext();
+                }
             }
-            visible: player.multipleVideos
+            visible: main.tilesMode || player.multipleVideos
         },
         PlasmaCore.Action {
             text: {
