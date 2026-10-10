@@ -13,6 +13,12 @@ set(daynight_SRCS
 add_library(plasma_wallpaper_svw_static STATIC ${daynight_SRCS})
 set_property(TARGET plasma_wallpaper_svw_static PROPERTY POSITION_INDEPENDENT_CODE ON)
 
+# Bake the GStreamer plugin path into the plugin so CappedVideoPlayer can set
+# GST_PLUGIN_SYSTEM_PATH_1_0 before gst_init (see default.nix).
+if(DEFINED GST_PLUGIN_PATH_1_0)
+    target_compile_definitions(plasma_wallpaper_svw_static PRIVATE GST_PLUGIN_PATH_1_0="${GST_PLUGIN_PATH_1_0}")
+endif()
+
 target_link_libraries(plasma_wallpaper_svw_static
     Qt6::Qml
     Qt6::Multimedia

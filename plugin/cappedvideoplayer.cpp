@@ -14,6 +14,8 @@
 #include <QVideoSink>
 #include <QtMath>
 
+#include <cstdlib>
+
 #include <gst/video/video-frame.h>
 
 namespace {
@@ -49,6 +51,13 @@ CappedVideoPlayer::CappedVideoPlayer(QObject *parent)
     // initializes it lazily, but our own pipeline creation needs it up front.
     static bool gstReady = false;
     if (!gstReady) {
+#ifdef GST_PLUGIN_PATH_1_0
+        // This QML plugin is runtime-loaded by plasmashell (not a wrapped
+        // binary), so GST_PLUGIN_SYSTEM_PATH_1_0 is not in its environment. Bake
+        // the plugin dirs in at build time (Nix resolves the store paths) so
+        // playbin/videoconvert/videoscale/appsink are discoverable.
+        setenv("GST_PLUGIN_SYSTEM_PATH_1_0", GST_PLUGIN_PATH_1_0, 1);
+#endif
         GError *err = nullptr;
         gstReady = gst_init_check(nullptr, nullptr, &err);
         if (!gstReady) {
