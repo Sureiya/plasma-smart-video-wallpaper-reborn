@@ -48,23 +48,26 @@ CappedVideoPlayer::CappedVideoPlayer(QObject *parent)
     : QObject(parent)
 {
     // GStreamer must be initialized before any element is created; QtMultimedia
-    // initializes it lazily, but our own pipeline creation needs it up front.
+    // may have already initialized it (with an empty plugin path) by the time
+    // this QML plugin loads, so we can't rely on setenv-before-gst_init alone.
     static bool gstReady = false;
     if (!gstReady) {
+        gstReady = true;
 #ifdef GST_PLUGIN_PATH_1_0
-        // This QML plugin is runtime-loaded by plasmashell (not a wrapped
-        // binary), so GST_PLUGIN_SYSTEM_PATH_1_0 is not in its environment. Bake
-        // the plugin dirs in at build time (Nix resolves the store paths) so
-        // playbin/videoconvert/videoscale/appsink are discoverable.
         setenv("GST_PLUGIN_SYSTEM_PATH_1_0", GST_PLUGIN_PATH_1_0, 1);
 #endif
         GError *err = nullptr;
-        gstReady = gst_init_check(nullptr, nullptr, &err);
-        if (!gstReady) {
+        if (!gst_init_check(nullptr, nullptr, &err)) {
             qWarning() << "CappedVideoPlayer: gst_init failed:"
                        << (err ? err->message : "unknown");
             g_clear_error(&err);
         }
+#ifdef GST_PLUGIN_PATH_1_0
+        // Even if gst was already initialized (e.g. by QtMultimedia's GStreamer
+        // backend) without our plugin path, explicitly scan the baked-in plugin
+        // dirs so playbin/videoconvert/videoscale/appsink become available.
+        gst_registry_scan_path(gst_registry_get(), GST_PLUGIN_PATH_1_0);
+#endif
     }
 }
 
@@ -350,7 +353,12 @@ void CappedVideoPlayer::buildPipeline()
     GstElement *scale = gst_element_factory_make("videoscale", "scale");
     m_capsfilter = gst_element_factory_make("capsfilter", "cap");
     if (!m_playbin || !m_appsink || !convert || !scale || !m_capsfilter) {
-        qWarning() << "CappedVideoPlayer: could not create pipeline elements";
+        qWarning() << "CappedVideoPlayer: could not create pipeline elements"
+                   << "playbin=" << (m_playbin ? "ok" : "MISSING")
+                   << "appsink=" << (m_appsink ? "ok" : "MISSING")
+                   << "videoconvert=" << (convert ? "ok" : "MISSING")
+                   << "videoscale=" << (scale ? "ok" : "MISSING")
+                   << "capsfilter=" << (m_capsfilter ? "ok" : "MISSING");
         teardownPipeline();
         return;
     }
