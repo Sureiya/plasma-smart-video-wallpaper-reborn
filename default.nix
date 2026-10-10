@@ -59,7 +59,7 @@ stdenv.mkDerivation (finalAttrs: {
     # Bake the GStreamer plugin dirs into the .so so CappedVideoPlayer can set
     # GST_PLUGIN_SYSTEM_PATH_1_0 before gst_init (plasmashell's env doesn't
     # carry it because this is a runtime-loaded QML plugin, not a wrapped binary).
-    "-DGST_PLUGIN_PATH_1_0=${lib.makeSearchPath "lib/gstreamer-1.0" [ gst_all_1.gstreamer gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good gst_all_1.gst-plugins-bad gst_all_1.gst-libav ]}"
+    "-DGST_PLUGIN_PATH_1_0=${lib.makeSearchPath "lib/gstreamer-1.0" [ (lib.getLib gst_all_1.gstreamer) gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good gst_all_1.gst-plugins-bad gst_all_1.gst-libav ]}"
   ];
 
   meta = with lib; {
