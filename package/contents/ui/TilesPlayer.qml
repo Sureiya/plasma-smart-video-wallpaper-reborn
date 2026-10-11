@@ -346,26 +346,35 @@ Item {
         const total = list.length;
         if (total === 0) return [];
         const want = Math.max(1, Math.min(root.maxTiles, total));
-        if (!root.randomize) {
-            return list.slice(0, want);
+
+        // STABLE deck: the permutation is seeded by monitorSalt ONLY (not
+        // cycleSeed), so the deck is identical every cycle. The window offset
+        // then advances by `want` each cycle, so each video plays once before any
+        // video repeats (when total > want). This fixes the old behaviour where
+        // re-shuffling every cycle re-picked recently-played videos by chance.
+        let perm;
+        if (root.randomize) {
+            const seed = (root.monitorSalt >>> 0) || 1;
+            let a = seed >>> 0;
+            const rnd = () => {
+                a |= 0; a = (a + 0x6D2B79F5) | 0;
+                let t = Math.imul(a ^ (a >>> 15), 1 | a);
+                t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+                return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            };
+            perm = list.map((_, i) => i);
+            for (let i = perm.length - 1; i > 0; i--) {
+                const j = Math.floor(rnd() * (i + 1));
+                const t = perm[i]; perm[i] = perm[j]; perm[j] = t;
+            }
+        } else {
+            perm = list.map((_, i) => i); // canonical order (no shuffle)
         }
-        // Seeded Fisher–Yates producing a permutation of 0..total-1.
-        const seed = ((root.cycleSeed + root.monitorSalt) >>> 0) || 1;
-        let a = seed >>> 0;
-        const rnd = () => {
-            a |= 0; a = (a + 0x6D2B79F5) | 0;
-            let t = Math.imul(a ^ (a >>> 15), 1 | a);
-            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-        };
-        const perm = list.map((_, i) => i);
-        for (let i = perm.length - 1; i > 0; i--) {
-            const j = Math.floor(rnd() * (i + 1));
-            const t = perm[i]; perm[i] = perm[j]; perm[j] = t;
-        }
-        // Rotate the window: advance the starting offset every cycle so the set of
-        // `want` videos changes over time (wraps around this monitor's slice).
-        const offset = (root.cycleSeed * want) % total;
+
+        // Rotate the window by `want` each cycle. buildPacket pre-increments
+        // cycleSeed, so subtract 1 to start at the deck's beginning.
+        const cyc = Math.max(0, (root.cycleSeed >>> 0) - 1);
+        const offset = (cyc * want) % total;
         const out = [];
         for (let k = 0; k < want; k++) {
             out.push(list[perm[(offset + k) % total]]);
